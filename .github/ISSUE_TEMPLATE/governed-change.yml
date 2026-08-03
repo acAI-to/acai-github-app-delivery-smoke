@@ -1,0 +1,116 @@
+name: Governed change
+description: Bounded issue-first plan for an ACAI repository change
+title: ""
+body:
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Tier
+      options:
+        - governance/tier-0
+        - governance/tier-1
+        - governance/tier-2
+    validations:
+      required: true
+  - type: textarea
+    id: changed_paths
+    attributes:
+      label: Changed paths
+      description: Planned repository-relative paths or globs.
+    validations:
+      required: true
+  - type: textarea
+    id: justification
+    attributes:
+      label: Justification
+      description: Why the declared tier meets the computed floor.
+    validations:
+      required: true
+  - type: textarea
+    id: simplest_viable_approach
+    attributes:
+      label: Simplest viable approach
+      description: 'State the simplest approach that meets the goal. Include "Simpler alternative considered: X, rejected because Y". Required tags: destructive/data-loss for data-deleting changes; fleet-wide for multi-host changes.'
+    validations:
+      required: true
+  - type: dropdown
+    id: repository_kind
+    attributes:
+      label: Repository kind
+      options:
+        - harness
+        - apps
+        - acai-ops
+    validations:
+      required: true
+  - type: dropdown
+    id: change_class
+    attributes:
+      label: Change class
+      options:
+        - mechanical
+        - routine
+        - bugfix
+        - governance
+        - other
+    validations:
+      required: true
+  - type: textarea
+    id: risk_tags
+    attributes:
+      label: Risk tags
+      description: Comma-separated risk tags, or none.
+    validations:
+      required: true
+  - type: dropdown
+    id: github_status
+    attributes:
+      label: GitHub status
+      options:
+        - advisory/pre-enforcement
+        - unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: adversarial_profile
+    attributes:
+      label: Adversarial profile
+      options:
+        - automated
+        - focused
+        - luna-max
+    validations:
+      required: true
+  - type: dropdown
+    id: action_phase
+    attributes:
+      label: Action phase
+      options:
+        - reviewable-artifact
+        - live-mutation
+    validations:
+      required: true
+  - type: dropdown
+    id: merge_effect
+    attributes:
+      label: Merge effect
+      options:
+        - none
+        - live-mutation
+    validations:
+      required: true
+  - type: textarea
+    id: plan
+    attributes:
+      label: Plan and fixed rubric
+      value: |
+        ## Goal
+
+        ## Plan
+
+        ## Fixed rubric
+        1. Criterion — validation owner — check/evidence
+
+        ## Non-goals
+    validations:
+      required: true

@@ -1,0 +1,79 @@
+name: acai-governance-pr-gate
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  issues: read
+  pull-requests: read
+  statuses: write
+
+jobs:
+  pre:
+    if: github.event.pull_request.head.repo.fork == false
+    runs-on: [self-hosted, linux, x64, acai-internal]
+    outputs:
+      head: ${{ steps.guard.outputs.head }}
+      pr: ${{ steps.guard.outputs.pr }}
+      release_sha: ${{ steps.guard.outputs.release_sha }}
+      trust: ${{ steps.guard.outputs.trust }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: guard
+        env:
+          FORK: ${{ github.event.pull_request.head.repo.fork }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          RELEASE_SHA: ${{ vars.ACAI_GOVERNANCE_PACKAGE_RELEASE_SHA }}
+        run: |
+          set -euo pipefail
+          TRUST="$(jq -cn --arg sha "$RELEASE_SHA" '{schema:"acai-governance-package-target-trust/v1",source_repository:"acAI-to/acai-harness",workflow_path:".github/workflows/acai-governance-package-evaluator.yml",workflow_ref:"stable",release_commit_sha:$sha,interface:"v1"}')"
+          jq -cn --argjson trust "$TRUST" --argjson fork "$FORK" '{trust:$trust,mode:"evaluate",fork:$fork}' | python3 scripts/governance_package_target.py target-pre
+          echo "head=$HEAD" >> "$GITHUB_OUTPUT"
+          echo "pr=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          echo "release_sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "trust=$TRUST" >> "$GITHUB_OUTPUT"
+
+  evaluate:
+    needs: pre
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      issues: read
+      pull-requests: read
+      statuses: read
+    uses: acAI-to/acai-harness/.github/workflows/acai-governance-package-evaluator.yml@stable
+    with:
+      interface: v1
+      mode: evaluate
+      expected_release_sha: ${{ needs.pre.outputs.release_sha }}
+      repository: ${{ github.repository }}
+      pr: ${{ needs.pre.outputs.pr }}
+      head_sha: ${{ needs.pre.outputs.head }}
+
+  post:
+    needs: [pre, evaluate]
+    if: needs.evaluate.outputs.eligible == 'true'
+    runs-on: [self-hosted, linux, x64, acai-internal]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify exact called SHA immediately before status write
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          HEAD: ${{ needs.pre.outputs.head }}
+          TRUST: ${{ needs.pre.outputs.trust }}
+        run: |
+          set -euo pipefail
+          RUN="$(gh api "repos/$REPO/actions/runs/$RUN_ID")"
+          jq -cn --argjson trust "$TRUST" --argjson run "$RUN" --argjson run_id "$RUN_ID" '{trust:$trust,mode:"evaluate",fork:false,run:$run,run_id:$run_id}' | python3 scripts/governance_package_target.py target-post
+          gh api --method POST "repos/$REPO/statuses/$HEAD" -f state=success -f context=governance/package-v1 -f description='exact attested governance package release accepted'

@@ -1,0 +1,151 @@
+name: governance-release-attestation
+
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      source_pr:
+        description: Merged Tier-2 source PR to revalidate from trusted default
+        required: true
+        type: string
+
+jobs:
+  dispatch-tier-two:
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.merged == true }}
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
+    runs-on: [self-hosted, linux, x64, acai-internal]
+    steps:
+      - name: Dispatch trusted-default attestation only for Tier 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          DEFAULT_BRANCH="$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)"
+          PR_JSON="$(gh api "repos/$REPO/pulls/$PR")"
+          if ! printf '%s' "$PR_JSON" | jq -e -r '.body // ""' | rg -q '(?im)^\s*(Tier|Declared tier)\s*:\s*(governance/tier-)?2\s*$'; then
+            echo "skip: merged source PR is not Tier 2"
+            exit 0
+          fi
+          gh workflow run governance-release-attestation.yml --repo "$REPO" --ref "$DEFAULT_BRANCH" -f source_pr="$PR"
+
+  attest:
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+    runs-on: [self-hosted, linux, x64, acai-internal]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Revalidate selected Tier-2 source from trusted default and attest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SOURCE_PR: ${{ inputs.source_pr }}
+          RUN_ID: ${{ github.run_id }}
+          OPERATOR_LOGINS: ${{ vars.ACAI_OPERATOR_GITHUB_LOGINS }}
+          TERRA_HIGH_REVIEW_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
+        run: |
+          set -euo pipefail
+          DEFAULT_BRANCH="$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)"
+          [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ] || { echo 'workflow_dispatch is not on default branch'; exit 1; }
+          PR_JSON="$(gh api "repos/$REPO/pulls/$SOURCE_PR")"
+          printf '%s' "$PR_JSON" > source-pr.json
+          printf '%s' "$PR_JSON" | jq -e -r '.body // ""' | rg -q '(?im)^\s*(Tier|Declared tier)\s*:\s*(governance/tier-)?2\s*$'
+          ISSUE="$(printf '%s' "$PR_JSON" | python3 -c 'import json,re,sys; m=re.search(r"(?im)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s*:?[ \t]+#(\d+)\b",json.load(sys.stdin).get("body") or ""); print(m.group(1) if m else "")')"
+          [ -n "$ISSUE" ] || { echo 'selected source PR has no governed issue'; exit 1; }
+          ISSUE_JSON="$(gh api "repos/$REPO/issues/$ISSUE")"
+          COMMENTS="$(gh api --paginate "repos/$REPO/issues/$ISSUE/comments?per_page=100" | jq -s 'add // []')"
+          TIMELINE="$(gh api --paginate "repos/$REPO/issues/$ISSUE/timeline?per_page=100" | jq -s 'add // []')"
+          RUN="$(gh api "repos/$REPO/actions/runs/$RUN_ID")"
+          printf '%s' "$ISSUE_JSON" > issue.json
+          printf '%s' "$COMMENTS" > comments.json
+          printf '%s' "$TIMELINE" > timeline.json
+          printf '%s' "$RUN" > run.json
+          RUN_SHA="$(printf '%s' "$RUN" | jq -r .head_sha)"
+          mapfile -t PIN_FACTS < <(python3 - "$REPO" "$SOURCE_PR" governance/governance-release-pin.json <<'PY'
+          import json,re,sys
+          repository, source_pr, path = sys.argv[1:]
+          raw = open(path, 'rb').read()
+          try:
+              pin = json.loads(raw)
+          except (ValueError, UnicodeDecodeError) as exc:
+              raise SystemExit(f'release pin is malformed: {exc}')
+          canonical = (json.dumps(pin, sort_keys=True, separators=(',', ':'), ensure_ascii=True) + '\n').encode()
+          required = {'schema','source_repository','source_pr','manifest_sha256','manifest_source_commit','governance_allowlists'}
+          if not isinstance(pin, dict) or set(pin) != required or raw != canonical:
+              raise SystemExit('release pin is not canonical or has an unsupported schema')
+          if pin['schema'] != 'acai-governance-deployment-pin/v3' or pin['source_repository'] != repository or pin['source_pr'] != int(source_pr):
+              raise SystemExit('release pin does not bind the selected source repository and PR')
+          if not re.fullmatch(r'[0-9a-f]{40}', str(pin['manifest_source_commit'])) or not re.fullmatch(r'[0-9a-f]{64}', str(pin['manifest_sha256'])):
+              raise SystemExit('release pin immutable identity is malformed')
+          if not isinstance(pin['governance_allowlists'], dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in pin['governance_allowlists'].items()):
+              raise SystemExit('release pin allowlists are malformed')
+          print(pin['manifest_source_commit'])
+          print(pin['manifest_sha256'])
+          PY
+          )
+          [ "${#PIN_FACTS[@]}" -eq 2 ] || { echo 'release pin extraction failed'; exit 1; }
+          CARRIER="${PIN_FACTS[0]}"
+          EXPECTED_MANIFEST_SHA256="${PIN_FACTS[1]}"
+          PR_COMMITS="$(gh api --paginate "repos/$REPO/pulls/$SOURCE_PR/commits?per_page=100" | jq -s 'add // []')"
+          printf '%s' "$PR_COMMITS" > source-pr-commits.json
+          printf '%s' "$PR_COMMITS" | jq -e --arg carrier "$CARRIER" 'type == "array" and any(.[]; type == "object" and .sha == $carrier)' >/dev/null
+          git cat-file -e "$CARRIER^{commit}"
+          git merge-base --is-ancestor "$CARRIER" "$RUN_SHA"
+          ASSOCIATED="$(gh api --paginate "repos/$REPO/commits/$CARRIER/pulls?per_page=100" | jq -s 'add // []')"
+          printf '%s' "$ASSOCIATED" > associated-prs.json
+          test "$(printf '%s' "$ASSOCIATED" | jq --argjson pr "$SOURCE_PR" 'any(.[]; .number == $pr)')" = true
+          git show "$CARRIER:.acai/governance-bootstrap-manifest.json" > source-manifest.json
+          test "$(sha256sum source-manifest.json | awk '{print $1}')" = "$EXPECTED_MANIFEST_SHA256"
+          ASSET="$(python3 - source-manifest.json <<'PY'
+          import json,re,sys
+          manifest=json.load(open(sys.argv[1], encoding='utf-8'))
+          asset=manifest.get('source_commit') if isinstance(manifest, dict) else ''
+          if not isinstance(asset, str) or not re.fullmatch(r'[0-9a-f]{40}', asset):
+              raise SystemExit('manifest asset source_commit is malformed')
+          print(asset)
+          PY
+          )"
+          git cat-file -e "$ASSET^{commit}"
+          git merge-base --is-ancestor "$ASSET" "$CARRIER"
+          TREE="$(python3 - "$ASSET" source-manifest.json <<'PY'
+          import hashlib,json,subprocess,sys
+          commit, manifest_path=sys.argv[1:]
+          manifest=json.load(open(manifest_path, encoding='utf-8'))
+          out=[]
+          for entry in manifest['files']:
+              path=entry['path']
+              mode, kind, _ = subprocess.check_output(['git','ls-tree',commit,'--',path], text=True).strip().split(None,2)
+              raw=subprocess.check_output(['git','show',f'{commit}:{path}'])
+              out.append({'path':path,'status':'M','deleted':False,'mode':mode,'type':kind,'sha256':hashlib.sha256(raw).hexdigest()})
+          print(json.dumps(out, sort_keys=True))
+          PY
+          )"
+          printf '%s' "$TREE" > tree.json
+          validate_one_json_document() {
+            local path="$1" expected_type="$2"
+            jq -e -s --arg expected_type "$expected_type" 'length == 1 and (.[0] | type == $expected_type)' "$path" >/dev/null
+          }
+          validate_one_json_document source-pr.json object
+          validate_one_json_document issue.json object
+          validate_one_json_document comments.json array
+          validate_one_json_document timeline.json array
+          validate_one_json_document run.json object
+          validate_one_json_document tree.json array
+          validate_one_json_document source-pr-commits.json array
+          validate_one_json_document associated-prs.json array
+          jq -n --arg repository "$REPO" --arg default_branch "$DEFAULT_BRANCH" --arg manifest_path "$GITHUB_WORKSPACE/source-manifest.json" --arg manifest_carrier "$CARRIER" --arg manifest_asset_commit "$ASSET" --arg expected_manifest_sha256 "$EXPECTED_MANIFEST_SHA256" --arg operator "$OPERATOR_LOGINS" --arg terra "$TERRA_HIGH_REVIEW_LOGINS" --slurpfile source_pr source-pr.json --slurpfile issue issue.json --slurpfile comments comments.json --slurpfile timeline timeline.json --slurpfile run run.json --slurpfile tree tree.json --slurpfile associated_prs associated-prs.json '{repository:$repository,default_branch:$default_branch,manifest_path:$manifest_path,manifest_carrier:$manifest_carrier,manifest_asset_commit:$manifest_asset_commit,manifest_asset_contained:true,expected_manifest_sha256:$expected_manifest_sha256,source_pr:$source_pr[0],issue:$issue[0],comments:$comments[0],timeline:$timeline[0],run:$run[0],tree:$tree[0],source_contained:true,associated_prs:$associated_prs[0],operator_logins:($operator|split(",")|map(select(length>0))),terra_high_review_logins:($terra|split(",")|map(select(length>0)))}' > release-input.json
+          python3 scripts/governance_release.py publish < release-input.json > release-attestation.md
+          gh issue comment "$ISSUE" --repo "$REPO" --body-file release-attestation.md
