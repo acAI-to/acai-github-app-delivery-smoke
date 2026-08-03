@@ -1,0 +1,108 @@
+name: change-governance
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions:
+  actions: read
+  contents: read
+  statuses: read
+  pull-requests: read
+  issues: read
+
+jobs:
+  issue-first:
+    runs-on: [self-hosted, linux, x64, acai-internal]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate issue, plan, rubric, branch, and plan review
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          OPERATOR_LOGINS: ${{ vars.ACAI_OPERATOR_GITHUB_LOGINS }}
+          TERRA_HIGH_REVIEW_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
+          LUNA_MAX_REVIEW_LOGINS: ${{ vars.ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS }}
+          HARNESS_SOURCE_REPOSITORY: acAI-to/acai-harness
+          PROPAGATION_CONTEXT: governance/propagation-attested
+          TRUSTED_REF: ${{ github.event.repository.default_branch }}
+          TRUSTED_ROOT: ${{ runner.temp }}/trusted-governance
+        run: |
+          set -euo pipefail
+          gh repo clone "$REPO" "$TRUSTED_ROOT" -- --quiet --no-recurse-submodules --depth=1 --branch "$TRUSTED_REF"
+          cd "$TRUSTED_ROOT"
+          TMP_DIR="$(mktemp -d)"
+          trap 'rm -rf "$TMP_DIR"' EXIT
+          if [ ! -r scripts/check_change_pr.py ] || [ ! -r scripts/plan_approval.py ]; then
+            if [ "${{ github.event.pull_request.draft }}" = true ]; then
+              echo "change-governance onboarding pending: draft PR — trusted default validator is absent or unreadable"
+              exit 0
+            fi
+            echo "::error::Ready PR rejected: trusted default validator is absent or unreadable"
+            exit 1
+          fi
+          PR="$(jq --arg repository "$REPO" \
+            '{body:(.pull_request.body // ""),headRefName:.pull_request.head.ref,baseRefName:.pull_request.base.ref,headRefOid:.pull_request.head.sha,number:.pull_request.number,isDraft:.pull_request.draft,repository:$repository}' \
+            "$GITHUB_EVENT_PATH")" || {
+            echo "::error::Governed pull_request event metadata is malformed"
+            exit 1
+          }
+          ISSUE_NUMBER="$(printf '%s' "$PR" | python3 -c 'import json,re,sys; body=json.load(sys.stdin)["body"]; m=re.search(r"(?im)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s*:?[ \t]+#(\d+)\b", body or ""); print(m.group(1) if m else "")')"
+          if [ -z "$ISSUE_NUMBER" ]; then
+            HEAD_SHA="$(printf '%s' "$PR" | jq -r .headRefOid)"
+            STATUSES="$(gh api --paginate "repos/$REPO/commits/$HEAD_SHA/statuses?per_page=100" | jq --arg head "$HEAD_SHA" -s '(add // []) | map(. + {sha:$head})')" || {
+              echo "::error::Unable to read exact-head propagation statuses"
+              exit 1
+            }
+            if jq -n \
+              --argjson pr "$PR" \
+              --argjson statuses "$STATUSES" \
+              --arg source "$HARNESS_SOURCE_REPOSITORY" \
+              --arg operators "$OPERATOR_LOGINS" \
+              '{pr:$pr,statuses:$statuses,trusted_source_repository:$source,operator_logins:($operators|split(",")|map(gsub("^\\s+|\\s+$"; "")|select(length>0)))}' \
+              | python3 scripts/governance_propagation_verify.py --local-admission \
+              | tee "$TMP_DIR/propagation.json" \
+              && test "$(jq -r .tier1_eligible "$TMP_DIR/propagation.json")" = true; then
+              echo "Change governance passed: exact-head allowlisted-operator Tier-1 propagation"
+              exit 0
+            fi
+            if [ "$(printf '%s' "$PR" | jq -r .isDraft)" = true ]; then
+              echo "Change governance pending: draft propagation lacks its exact-head attestation"
+              exit 0
+            fi
+            BODY_LENGTH="$(printf '%s' "$PR" | jq -r '.body | length')"
+            echo "::error::Ready PR body must close/fix/resolve or identify its governed issue, or pass exact-head Tier-1 propagation admission (event body length=$BODY_LENGTH)"
+            exit 1
+          fi
+          gh pr diff "$PR_NUMBER" --repo "$REPO" --name-only | jq -Rsc 'split("\n") | map(select(length > 0))' > "$TMP_DIR/changed-paths.json"
+          PR="$(printf '%s' "$PR" | jq --slurpfile paths "$TMP_DIR/changed-paths.json" '.changed_paths=$paths[0]')"
+          ISSUE="$(gh api "repos/$REPO/issues/$ISSUE_NUMBER" --jq '{number,body:(.body // ""),labels}')" || {
+            echo "::error::Unable to read governed issue #$ISSUE_NUMBER through the GitHub REST API"
+            exit 1
+          }
+          COMMENTS="$(gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments?per_page=100" | jq -s 'add // []')" || {
+            echo "::error::Unable to read comments for governed issue #$ISSUE_NUMBER"
+            exit 1
+          }
+          TIMELINE="$(gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/timeline?per_page=100" | jq -s 'add // []')" || {
+            echo "::error::Unable to read timeline for governed issue #$ISSUE_NUMBER"
+            exit 1
+          }
+          printf '%s' "$PR" > "$TMP_DIR/pr.json"
+          printf '%s' "$ISSUE" > "$TMP_DIR/issue.json"
+          printf '%s' "$COMMENTS" > "$TMP_DIR/comments.json"
+          printf '%s' "$TIMELINE" > "$TMP_DIR/timeline.json"
+          set +e
+          DETAIL="$(jq -n --slurpfile pr "$TMP_DIR/pr.json" --slurpfile issue "$TMP_DIR/issue.json" --slurpfile comments "$TMP_DIR/comments.json" --slurpfile timeline "$TMP_DIR/timeline.json" --arg logins "$OPERATOR_LOGINS" --arg terra_high "$TERRA_HIGH_REVIEW_LOGINS" --arg luna_max "$LUNA_MAX_REVIEW_LOGINS" \
+            '{pr:$pr[0],issue:$issue[0],comments:$comments[0],timeline:$timeline[0],operator_logins:($logins|split(",")|map(select(length>0))),terra_high_review_logins:($terra_high|split(",")|map(select(length>0))),luna_max_review_logins:($luna_max|split(",")|map(select(length>0)))}' \
+            | python3 scripts/check_change_pr.py 2>&1)"
+          RC=$?
+          set -e
+          printf '%s\n' "$DETAIL"
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::${DETAIL:-Change-governance evaluator failed without a reason}"
+            exit "$RC"
+          fi

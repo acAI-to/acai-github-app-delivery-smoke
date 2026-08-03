@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "repository_kind": "harness",
+  "default_tier": 1,
+  "mechanical_paths": ["*.md", "docs/**"],
+  "action_metadata": {
+    "action_phases": ["reviewable-artifact", "live-mutation"],
+    "merge_effects": ["none", "live-mutation"],
+    "trusted_control_change_classes": ["trusted-control", "trusted-evaluator", "auto-apply", "deploy-enabling"]
+  },
+  "rules": [
+    {"tier": 2, "paths": ["governance/command-policy.json", "scripts/command_policy.py", "bin/generate-claude-command-policy", ".claude/settings.json", ".claude/command-policy.generated.json", ".claude/hooks/enforce_command_policy.py"]},
+    {"tier": 2, "paths": ["AGENTS.md", "CLAUDE.md", "HERMES.md", "docs/harness-governance-enforcement.md", "docs/governance-activation-playbook.md", ".github/workflows/**", "bin/**", "scripts/*governance*", "scripts/plan_approval.py", "scripts/check_*pr.py", "scripts/check_gate_b.py", "scripts/tier_policy.py", "scripts/validation_profile.py", ".claude/hooks/**", ".acai/governance-bootstrap-manifest.json", "governance/**"]},
+    {"tier": 2, "predicates": {"risk_tags": ["destructive", "data-loss", "irreversible", "fleet-wide", "multi-host", "security", "auth", "secret"]}},
+    {"tier": 1, "paths": [".acai/skills/**", "docs/**", "tests/**"]},
+    {"tier": 0, "paths": ["*.md", "docs/**"], "predicates": {"change_class": "mechanical"}}
+  ]
+}

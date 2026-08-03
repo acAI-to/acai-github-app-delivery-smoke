@@ -1,0 +1,150 @@
+name: governance-orchestrator-merge
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Open Tier-0/1 PR number to evaluate and atomically merge
+        required: true
+        type: string
+
+# A repository-wide group is deliberately stricter than per-base serialization:
+# it cannot permit two bases to race, and avoids executing any PR-owned code.
+concurrency:
+  group: acai-governance-merge-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  checks: read
+  contents: write
+  pull-requests: write
+  statuses: read
+  issues: read
+
+jobs:
+  merge:
+    runs-on: [self-hosted, linux, x64, acai-internal]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Read API evidence without executing PR code
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+          OPERATOR_LOGINS: ${{ vars.ACAI_OPERATOR_GITHUB_LOGINS }}
+          DIRECTOR_LOGINS: ${{ vars.ACAI_DIRECTOR_GITHUB_LOGINS }}
+          TERRA_HIGH_REVIEW_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
+        run: |
+          set -euo pipefail
+          PR_JSON="$(gh pr view "$PR" --repo "$REPO" --json number,state,isDraft,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,body,reviews)"
+          HEAD="$(printf '%s' "$PR_JSON" | jq -r .headRefOid)"
+          [ -n "$HEAD" ] && [ "$HEAD" != null ] || { echo 'missing PR head SHA'; exit 1; }
+          BASE="$(gh api "repos/$REPO/pulls/$PR" --jq '.base.sha // empty')"
+          [ -n "$BASE" ] && [ "$BASE" != null ] || { echo 'missing PR base SHA'; exit 1; }
+          printf 'VALIDATED_HEAD=%s\n' "$HEAD" >> "$GITHUB_ENV"
+          CHECK_DEFINITIONS_VALID="$(python3 - "$REPO" "$HEAD" "$BASE" <<'PY'
+          import json, subprocess, sys
+          repository, head, base = sys.argv[1:]
+          paths = {'.github/workflows/change-governance.yml', '.github/workflows/ci.yml'}
+          def api(path):
+              proc = subprocess.run(['gh','api',path], text=True, capture_output=True, check=False)
+              if proc.returncode: raise RuntimeError(path)
+              return json.loads(proc.stdout)
+          def blobs(commit):
+              tree = api(f'repos/{repository}/git/trees/{commit}?recursive=1')
+              if tree.get('truncated') is True: raise RuntimeError('truncated tree')
+              return {item.get('path'): item for item in tree.get('tree', []) if isinstance(item, dict)}
+          try:
+              at_head, at_base = blobs(head), blobs(base)
+              valid = all(at_head.get(path, {}).get('type') == 'blob' and at_head.get(path, {}).get('sha') == at_base.get(path, {}).get('sha') for path in paths)
+          except (RuntimeError, ValueError, TypeError, json.JSONDecodeError):
+              raise SystemExit('required check workflow blob provenance is unavailable')
+          print(json.dumps(valid))
+          PY
+          )"
+          STATUSES="$(gh api "repos/$REPO/commits/$HEAD/status" --jq '.statuses // []')"
+          gh api "repos/$REPO/commits/$HEAD/check-runs?per_page=100" > check-runs-raw.json
+          CHECK_RUNS="$(python3 - "$REPO" "$HEAD" check-runs-raw.json <<'PY'
+          import json, re, subprocess, sys
+          repository, head, raw_path = sys.argv[1:]
+          raw = json.load(open(raw_path))
+          result = []
+          for check in raw.get('check_runs', []):
+              item = {key: check.get(key) for key in ('name','details_url','head_sha','status','conclusion','app')}
+              match = re.fullmatch(rf'https://github\.com/{re.escape(repository)}/actions/runs/(\d+)(?:/job/\d+)?', str(check.get('details_url') or ''))
+              if match:
+                  proc = subprocess.run(['gh','api',f'repos/{repository}/actions/runs/{match.group(1)}'], text=True, capture_output=True, check=False)
+                  if proc.returncode == 0:
+                      try: item['run'] = json.loads(proc.stdout)
+                      except json.JSONDecodeError: pass
+              result.append(item)
+          print(json.dumps(result, sort_keys=True))
+          PY
+          )"
+          ISSUE="$(printf '%s' "$PR_JSON" | python3 -c 'import json,re,sys; m=re.search(r"(?im)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s*:?[ \t]+#(\d+)\b", json.load(sys.stdin).get("body") or ""); print(m.group(1) if m else "")')"
+          PATHS="$(gh pr diff "$PR" --repo "$REPO" --name-only | jq -Rsc 'split("\n") | map(select(length > 0))')"
+          PR_JSON="$(printf '%s' "$PR_JSON" | jq --arg repo "$REPO" --arg base "$BASE" --argjson paths "$PATHS" '. + {repository:$repo,baseRefOid:$base,changed_paths:$paths}')"
+          printf '%s' "$PR_JSON" > pr.json
+          PROPAGATION="$(python3 - <<'PY'
+          import json
+          from scripts.governance_merge import parse_propagation_source
+          pr=json.load(open('pr.json'))
+          repository, number, reasons=parse_propagation_source(pr.get('body',''))
+          print(json.dumps({'repository':repository,'pr':number,'reasons':reasons}))
+          PY
+          )"
+          PROPAGATION_VALID=null
+          if [ -z "$ISSUE" ] && [ "$(printf '%s' "$PROPAGATION" | jq -r '.repository // empty')" ]; then
+            SOURCE_REPOSITORY="$(printf '%s' "$PROPAGATION" | jq -r .repository)"
+            SOURCE_PR="$(printf '%s' "$PROPAGATION" | jq -r .pr)"
+            jq -n --arg source_repository "$SOURCE_REPOSITORY" --arg source_pr "$SOURCE_PR" --arg target_repository "$REPO" --arg target_pr "$PR" '{source_repository:$source_repository,source_pr:$source_pr,target_repository:$target_repository,target_pr:$target_pr}' | python3 scripts/governance_propagation_collect.py > propagation-provenance.json
+            python3 scripts/governance_propagation_verify.py < propagation-provenance.json > propagation-eligibility.json
+            test "$(jq -r .tier1_eligible propagation-eligibility.json)" = true
+            test "$(jq -r .target.head propagation-provenance.json)" = "$HEAD"
+            PROPAGATION_VALID=true
+            ISSUE_JSON='{}'; COMMENTS='[]'; TIMELINE='[]'
+          elif [ -z "$ISSUE" ]; then
+            echo 'missing governed issue or eligible propagation declaration'; exit 1
+          else
+            ISSUE_JSON="$(gh api "repos/$REPO/issues/$ISSUE")"
+            COMMENTS="$(gh api --paginate "repos/$REPO/issues/$ISSUE/comments?per_page=100" | jq -s 'add // []')"
+            TIMELINE="$(gh api --paginate "repos/$REPO/issues/$ISSUE/timeline?per_page=100" | jq -s 'add // []')"
+            jq -n --argjson pr "$PR_JSON" --argjson issue "$ISSUE_JSON" --argjson comments "$COMMENTS" --argjson timeline "$TIMELINE" --arg operator "$OPERATOR_LOGINS" --arg director "$DIRECTOR_LOGINS" --arg terra "$TERRA_HIGH_REVIEW_LOGINS" '{pr:$pr,issue:$issue,comments:$comments,timeline:$timeline,operator_logins:($operator|split(",")|map(select(length>0))),director_logins:($director|split(",")|map(select(length>0))),terra_high_review_logins:($terra|split(",")|map(select(length>0)))}' | python3 scripts/check_change_pr.py
+          fi
+          if [ "$(printf '%s' "$PROPAGATION" | jq '.reasons | length')" != 0 ]; then
+            PROPAGATION_VALID=false
+          fi
+          printf '%s' "$ISSUE_JSON" > issue.json
+          GOVERNANCE="$(ISSUE_JSON="$ISSUE_JSON" PROPAGATION_VALID="$PROPAGATION_VALID" python3 - <<'PY'
+          import json, os, sys
+          sys.path.insert(0,'scripts')
+          import check_change_pr
+          pr=json.load(open('pr.json')); issue=json.loads(os.environ['ISSUE_JSON'])
+          propagation=os.environ['PROPAGATION_VALID'] == 'true'
+          issue_body=pr.get('body','') if propagation else issue.get('body','')
+          metadata=check_change_pr.parse_governance_metadata(pr.get('body',''), issue_body)
+          tier=check_change_pr.declared_tier(pr, issue_body)
+          print(json.dumps({'tier':tier,'action_phase':metadata['action_phase'],'merge_effect':metadata['merge_effect'],'metadata_valid':not metadata['action_metadata_errors'],'approval_valid':True,'trusted_run_valid':True}))
+          PY
+          )"
+          printf '%s' "$PR_JSON" > pr.json
+          GOVERNANCE="$(printf '%s' "$GOVERNANCE" | jq --argjson propagation_valid "$PROPAGATION_VALID" --argjson trusted_check_definitions_valid "$CHECK_DEFINITIONS_VALID" '. + {propagation_valid:$propagation_valid,trusted_check_definitions_valid:$trusted_check_definitions_valid}')"
+          jq -n --slurpfile pr pr.json --argjson statuses "$STATUSES" --argjson checks "$CHECK_RUNS" --argjson governance "$GOVERNANCE" '{pr:$pr[0],statuses:$statuses,check_runs:$checks,governance:$governance}' | python3 scripts/governance_merge.py
+      - name: Atomic expected-head merge
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          CURRENT_HEAD="$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)"
+          [ "$CURRENT_HEAD" = "$VALIDATED_HEAD" ] || { echo 'PR head changed after validation'; exit 1; }
+          gh api -X PUT "repos/$REPO/pulls/$PR/merge" -f sha="$VALIDATED_HEAD" -f merge_method=squash

@@ -1,0 +1,90 @@
+name: governance-gate
+
+# Advisory publication of the harness Gate-B (adversarial review) evidence.
+# On GitHub Free this status informs the operator's merge decision; it does not
+# enforce a merge block or require branch protection.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issue_comment:
+    types: [created, edited, deleted]
+
+permissions:
+  actions: read
+  contents: read
+  statuses: write
+  pull-requests: read
+  issues: read
+
+jobs:
+  gate-b:
+    # Run for PR events, and for comment events only when the comment is on a PR.
+    if: ${{ github.event_name == 'pull_request' || (github.event_name == 'issue_comment' && github.event.issue.pull_request) }}
+    runs-on: [self-hosted, linux, x64, acai-internal]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Evaluate Gate-B artifact and publish commit status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
+          ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS: ${{ vars.ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TRUSTED_REF: ${{ github.event.repository.default_branch }}
+          TRUSTED_ROOT: ${{ runner.temp }}/trusted-governance
+        run: |
+          set -euo pipefail
+          gh repo clone "$REPO" "$TRUSTED_ROOT" -- --quiet --no-recurse-submodules --depth=1 --branch "$TRUSTED_REF"
+          cd "$TRUSTED_ROOT"
+          PR_META="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid,isDraft)"
+          HEAD_SHA="$(printf '%s' "$PR_META" | jq -r .headRefOid)"
+          IS_DRAFT="$(printf '%s' "$PR_META" | jq -r .isDraft)"
+          echo "PR #$PR_NUMBER head=$HEAD_SHA draft=$IS_DRAFT"
+          PR_BODY="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json body -q .body)"
+          DECLARED_TIER="$(printf '%s' "$PR_BODY" | sed -nE 's/^[[:space:]]*(Tier|Declared tier)[[:space:]]*:[[:space:]]*(governance\/tier-)?([012])[[:space:]]*$/\3/p' | head -n1)"
+          if [ -z "$DECLARED_TIER" ]; then
+            if [ "$IS_DRAFT" = true ]; then echo "Gate B pending: draft PR has no declared tier"; exit 0; fi
+            echo "::error::Ready PR rejected: declared tier is missing or ambiguous; Tier 2 is required"; exit 1
+          fi
+          if [ "$DECLARED_TIER" -lt 2 ]; then
+            STATE=success
+            DETAIL="Gate B waived by declared Tier $DECLARED_TIER; minimum floor is enforced by change-governance"
+            gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$STATE" -f context="governance/gate-b-evaluation" -f description="$(printf '%.140s' "$DETAIL")" -f target_url="https://github.com/$REPO/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+            echo "$DETAIL"
+            exit 0
+          fi
+          COMMENTS="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments")"
+          if [ ! -r scripts/check_gate_b.py ]; then
+            if [ "$IS_DRAFT" = true ]; then
+              DETAIL="Gate B bootstrap pending: draft PR — trusted default validator is absent or unreadable"
+              RC=0
+            else
+              DETAIL="Ready PR rejected: trusted default Gate-B validator is absent or unreadable"
+              RC=1
+            fi
+            if [ "$RC" -eq 0 ]; then STATE=success; else STATE=failure; fi
+            gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" -f state="$STATE" -f context="governance/gate-b-evaluation" \
+              -f description="$(printf '%.140s' "$DETAIL")" \
+              -f target_url="https://github.com/$REPO/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+            printf '%s\n' "$DETAIL"
+            exit "$RC"
+          fi
+          set +e
+          DRAFT_ARG=()
+          if [ "$IS_DRAFT" = true ]; then DRAFT_ARG=(--draft); fi
+          DETAIL="$(printf '%s' "$COMMENTS" | jq -s 'add // []' | python3 scripts/check_gate_b.py "$HEAD_SHA" "${DRAFT_ARG[@]}")"
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then STATE=success; else STATE=failure; fi
+          echo "gate-b: $STATE — $DETAIL"
+          gh api -X POST "repos/$REPO/statuses/$HEAD_SHA" \
+            -f state="$STATE" \
+            -f context="governance/gate-b-evaluation" \
+            -f description="$(printf '%.140s' "$DETAIL")" \
+            -f target_url="https://github.com/$REPO/actions/runs/${GITHUB_RUN_ID}" >/dev/null
+          # Mirror the verdict into this run's status for visibility.
+          [ "$RC" -eq 0 ]

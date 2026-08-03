@@ -1,0 +1,16 @@
+name: ACAI hermetic execution
+description: Run tests and validators in an explicit, credential-free environment.
+
+inputs:
+  command:
+    description: Shell command to execute in the hermetic scope.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Run hermetic command
+      shell: bash
+      env:
+        ACAI_HERMETIC_COMMAND: ${{ inputs.command }}
+      run: '"$GITHUB_ACTION_PATH/hermetic-exec.sh"'
