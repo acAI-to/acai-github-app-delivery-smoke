@@ -107,40 +107,96 @@ def _derive_target_closures(target: dict, source_bytes: bytes, manifest_carrier:
     reasons: list[str] = []
     try:
         source_manifest = json.loads(source_bytes)
-        prior_bytes = base64.b64decode(str(target.get("prior_manifest_bytes_base64", "")), validate=True)
-        prior_manifest = json.loads(prior_bytes)
-        base_state_bytes = base64.b64decode(str(target.get("base_state_bytes_base64", "")), validate=True)
-        base_state = json.loads(base_state_bytes)
         head_state_bytes = base64.b64decode(str(target.get("head_state_bytes_base64", "")), validate=True)
         head_state = json.loads(head_state_bytes)
-        old, new = _closure_from_manifest(prior_manifest), _closure_from_manifest(source_manifest)
+        new = _closure_from_manifest(source_manifest)
     except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
         return {}, {}, ["independent old/new closure evidence is malformed"]
-    expected_prior_digest = base_state.get("manifest_sha256") if isinstance(base_state, dict) else None
-    prior_variants: object = None
-    if isinstance(base_state, dict) and base_state.get("manifest_version") == 3 and isinstance(source_manifest.get("settings"), dict):
+    mode = target.get("installation_mode", "upgrade")
+    if mode not in {"upgrade", "first-install"}:
+        return {}, new, ["target installation mode is missing or invalid"]
+
+    if mode == "first-install":
+        old: dict[str, dict[str, str]] = {}
+        if target.get("base_state_bytes_base64") != "" or target.get("prior_manifest_bytes_base64") != "":
+            reasons.append("first-install prior state or manifest evidence is not absent")
+        entries = target.get("base_repository_tree")
+        if target.get("base_repository_tree_truncated") is not False or not isinstance(entries, list):
+            reasons.append("first-install exact base tree is unavailable or truncated")
+        else:
+            paths: set[str] = set()
+            malformed = False
+            for item in entries:
+                if not isinstance(item, dict) or set(item) != {"path", "mode", "type", "sha"}:
+                    malformed = True
+                    break
+                path, item_mode, kind, sha = item.get("path"), item.get("mode"), item.get("type"), item.get("sha")
+                if (
+                    not isinstance(path, str) or not path or path.startswith("/") or "\\" in path
+                    or any(part in {"", ".", ".."} for part in path.split("/"))
+                    or path in paths or not isinstance(item_mode, str)
+                    or not re.fullmatch(r"(?:040000|100644|100755|120000|160000)", item_mode)
+                    or kind not in {"blob", "tree", "commit"}
+                    or (kind == "tree" and item_mode != "040000")
+                    or (kind == "commit" and item_mode != "160000")
+                    or (kind == "blob" and item_mode not in {"100644", "100755", "120000"})
+                    or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+                ):
+                    malformed = True
+                    break
+                paths.add(path)
+            if malformed:
+                reasons.append("first-install exact base tree evidence is malformed")
+            else:
+                def governed(path: str) -> bool:
+                    name = path.rsplit("/", 1)[-1]
+                    return (
+                        path in new
+                        or path.startswith((".acai/governance-", "governance/", ".github/actions/acai-hermetic-execution/", ".github/ISSUE_TEMPLATE/governed-change"))
+                        or (path.startswith(".github/workflows/") and any(token in name for token in ("governance", "plan-approval", "plan-review", "gate-b-relay")))
+                        or path == "bin/pr-merge-readiness"
+                        or (path.startswith("scripts/") and (name.startswith("governance_") or name in {"check_change_pr.py", "check_gate_b.py", "director_pr_lookup.sh", "plan_approval.py", "pr_merge_readiness.py", "tier_policy.py", "validation_profile.py"}))
+                        or (path.startswith("tests/") and (name.startswith("test_governance_") or name in {"test_pr_merge_readiness.py", "test_validation_profile.py"}))
+                    )
+                if any(governed(path) for path in paths):
+                    reasons.append("first-install base is not clean")
+        if target.get("base_tree") != []:
+            reasons.append("first-install old closure tree is not empty")
+        prior_variants: object = None
+    else:
         try:
-            expected_prior_digest, prior_variants = _historical_variant_reference(
-                source_manifest, base_state.get("source_commit")
-            )
-        except ValueError:
-            reasons.append("target base version-3 carrier provenance is stale or ambiguous")
-    base_is_v3 = isinstance(base_state, dict) and base_state.get("manifest_version") == 3
-    base_provenance = (
-        isinstance(base_state, dict)
-        and isinstance(prior_manifest.get("source_commit"), str)
-        and re.fullmatch(r"[0-9a-f]{40}", prior_manifest["source_commit"])
-        and (
-            base_is_v3
-            or (
-                base_state.get("source_commit") == prior_manifest.get("source_commit")
-                and isinstance(base_state.get("manifest_source_commit"), str)
-                and re.fullmatch(r"[0-9a-f]{40}", base_state["manifest_source_commit"])
+            prior_bytes = base64.b64decode(str(target.get("prior_manifest_bytes_base64", "")), validate=True)
+            prior_manifest = json.loads(prior_bytes)
+            base_state_bytes = base64.b64decode(str(target.get("base_state_bytes_base64", "")), validate=True)
+            base_state = json.loads(base_state_bytes)
+            old = _closure_from_manifest(prior_manifest)
+        except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError):
+            return {}, new, ["independent old/new closure evidence is malformed"]
+        expected_prior_digest = base_state.get("manifest_sha256") if isinstance(base_state, dict) else None
+        prior_variants = None
+        if isinstance(base_state, dict) and base_state.get("manifest_version") == 3 and isinstance(source_manifest.get("settings"), dict):
+            try:
+                expected_prior_digest, prior_variants = _historical_variant_reference(
+                    source_manifest, base_state.get("source_commit")
+                )
+            except ValueError:
+                reasons.append("target base version-3 carrier provenance is stale or ambiguous")
+        base_is_v3 = isinstance(base_state, dict) and base_state.get("manifest_version") == 3
+        base_provenance = (
+            isinstance(base_state, dict)
+            and isinstance(prior_manifest.get("source_commit"), str)
+            and re.fullmatch(r"[0-9a-f]{40}", prior_manifest["source_commit"])
+            and (
+                base_is_v3
+                or (
+                    base_state.get("source_commit") == prior_manifest.get("source_commit")
+                    and isinstance(base_state.get("manifest_source_commit"), str)
+                    and re.fullmatch(r"[0-9a-f]{40}", base_state["manifest_source_commit"])
+                )
             )
         )
-    )
-    if not base_provenance or expected_prior_digest != hashlib.sha256(prior_bytes).hexdigest() or set(base_state.get("files", [])) != set(old):
-        reasons.append("target base bootstrap does not bind the prior attested closure")
+        if not base_provenance or expected_prior_digest != hashlib.sha256(prior_bytes).hexdigest() or set(base_state.get("files", [])) != set(old):
+            reasons.append("target base bootstrap does not bind the prior attested closure")
     if (
         not isinstance(head_state, dict)
         or head_state.get("source_commit") != source_manifest.get("source_commit")
@@ -159,11 +215,12 @@ def _derive_target_closures(target: dict, source_bytes: bytes, manifest_carrier:
             result[str(item.get("path"))] = {"mode": item.get("mode"), "sha256": item.get("sha256")}
         return result
     try:
-        old = _complete_historical_closure(
-            old, prior_variants, tree_closure(target.get("base_tree"))
-        )
-        if tree_closure(target.get("base_tree")) != old:
-            reasons.append("target base tree does not match independently derived old closure")
+        if mode == "upgrade":
+            old = _complete_historical_closure(
+                old, prior_variants, tree_closure(target.get("base_tree"))
+            )
+            if tree_closure(target.get("base_tree")) != old:
+                reasons.append("target base tree does not match independently derived old closure")
         if tree_closure(target.get("head_tree")) != new:
             reasons.append("target head tree does not match independently derived new closure")
     except ValueError:

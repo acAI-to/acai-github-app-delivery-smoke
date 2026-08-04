@@ -128,10 +128,9 @@ def evaluate_strict(
     comments: list[dict[str, Any]],
     timeline: list[dict[str, Any]],
     allowlist: set[str],
-    terra_high_review_logins: set[str],
+    review_logins: set[str],
     source_run_validator: Callable[[str, str, str, str], list[str]] | None = None,
     enforce_tier: bool = False,
-    luna_max_review_logins: set[str] | None = None,
 ) -> tuple[bool, str]:
     number = linked_issue(str(pr.get("body", "")))
     if number is None or number != issue.get("number"):
@@ -176,15 +175,14 @@ def evaluate_strict(
         return True, f"issue-first governance PASS for #{number} (Tier 1 Gate A; Gate B waived)"
     approval = plan_approval.latest_plan_review(comments)
     review_reasons = plan_approval.validate_plan_review(
-        repository=repository, issue=issue, comment=approval, allowlist=terra_high_review_logins,
-        luna_allowlist=luna_max_review_logins,
+        repository=repository, issue=issue, comment=approval, allowlist=review_logins,
     )
     if review_reasons:
         return False, "; ".join(review_reasons)
     approval_reasons = plan_approval.validate_approval(repository=repository, issue=issue, comments=comments, timeline=timeline, allowlist=allowlist, source_run_validator=source_run_validator)
     if approval_reasons:
         return False, "; ".join(approval_reasons)
-    return True, f"issue-first governance PASS for #{number} (Tier 2 Luna/max review + digest-bound operator label; validation={selected_profile['profile']})"
+    return True, f"issue-first governance PASS for #{number} (Tier 2 independent review + digest-bound operator label; validation={selected_profile['profile']})"
 
 
 def evaluate(
@@ -193,14 +191,13 @@ def evaluate(
     comments: list[dict[str, Any]],
     timeline: list[dict[str, Any]],
     allowlist: set[str],
-    terra_high_review_logins: set[str],
+    review_logins: set[str],
     source_run_validator: Callable[[str, str, str, str], list[str]] | None = None,
     enforce_tier: bool = False,
-    luna_max_review_logins: set[str] | None = None,
 ) -> tuple[bool, str]:
     ok, reason = evaluate_strict(
-        pr, issue, comments, timeline, allowlist, terra_high_review_logins, source_run_validator,
-        enforce_tier, luna_max_review_logins
+        pr, issue, comments, timeline, allowlist, review_logins, source_run_validator,
+        enforce_tier
     )
     if not ok and bool(pr.get("isDraft")):
         return True, f"Change governance pending: draft PR — {reason}"
@@ -218,11 +215,10 @@ def main() -> int:
         comments = payload["comments"]
         timeline = payload["timeline"]
         allowlist = set(payload.get("operator_logins", []))
-        terra_high_review_logins = set(payload.get("terra_high_review_logins", []))
-        luna_max_review_logins = set(payload.get("luna_max_review_logins", []))
+        independent_review_logins = set(payload.get("independent_review_logins", []))
         ok, reason = evaluate(
-            pr, issue, comments, timeline, allowlist, terra_high_review_logins,
-            enforce_tier=True, luna_max_review_logins=luna_max_review_logins,
+            pr, issue, comments, timeline, allowlist, independent_review_logins,
+            enforce_tier=True,
         )
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         ok, reason = False, f"malformed change-governance payload: {exc}"

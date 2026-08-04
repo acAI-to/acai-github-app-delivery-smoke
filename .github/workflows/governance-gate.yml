@@ -31,8 +31,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
-          ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
-          ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS: ${{ vars.ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS }}
+          ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS: ${{ vars.ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           TRUSTED_REF: ${{ github.event.repository.default_branch }}
           TRUSTED_ROOT: ${{ runner.temp }}/trusted-governance
@@ -76,7 +75,10 @@ jobs:
           set +e
           DRAFT_ARG=()
           if [ "$IS_DRAFT" = true ]; then DRAFT_ARG=(--draft); fi
-          DETAIL="$(printf '%s' "$COMMENTS" | jq -s 'add // []' | python3 scripts/check_gate_b.py "$HEAD_SHA" "${DRAFT_ARG[@]}")"
+          mapfile -t REVIEW_ENV_NAMES < <(python3 -c 'import pathlib,re; print("\n".join(sorted(set(re.findall(r"ACAI_[A-Z0-9_]+_REVIEW_GITHUB_LOGINS",pathlib.Path("scripts/check_gate_b.py").read_text())))))')
+          REVIEW_ENV=()
+          for NAME in "${REVIEW_ENV_NAMES[@]}"; do REVIEW_ENV+=("$NAME=$ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS"); done
+          DETAIL="$(printf '%s' "$COMMENTS" | jq -s 'add // []' | env "${REVIEW_ENV[@]}" python3 scripts/check_gate_b.py "$HEAD_SHA" "${DRAFT_ARG[@]}")"
           RC=$?
           set -e
           if [ "$RC" -eq 0 ]; then STATE=success; else STATE=failure; fi

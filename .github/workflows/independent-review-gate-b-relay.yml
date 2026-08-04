@@ -1,4 +1,4 @@
-name: luna-max-gate-b-relay
+name: independent-review-gate-b-relay
 
 on:
   workflow_dispatch:
@@ -7,16 +7,16 @@ on:
         description: Pull request number
         required: true
       head_sha:
-        description: Full commit SHA reviewed by the independent Luna/max reviewer
+        description: Full commit SHA reviewed by the independent reviewer
         required: true
       session_id:
-        description: Luna/max review session ID
+        description: Independent review session ID
         required: true
       verdict:
         description: PASS or FAIL
         required: true
       findings:
-        description: Concise raw Luna/max review findings
+        description: Concise raw independent review findings
         required: true
 
 permissions:
@@ -33,7 +33,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           RELAY_ACTOR: ${{ github.triggering_actor }}
-          ALLOWED_RELAYS: ${{ vars.ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS }}
+          ALLOWED_RELAYS: ${{ vars.ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS }}
           PR_NUMBER: ${{ inputs.pr_number }}
           HEAD_SHA: ${{ inputs.head_sha }}
           VERDICT: ${{ inputs.verdict }}
@@ -51,14 +51,12 @@ jobs:
             '<!-- ACAI-GATE-B -->' \
             "Gate-B: $VERDICT" \
             "Commit: $HEAD_SHA" \
-            'Reviewer: luna-max' \
+            'Reviewer: independent-review' \
             "Session: $SESSION_ID" \
             "Relay-Actor: $RELAY_ACTOR" \
             'Source-Event: workflow_dispatch' \
             "Source-URL: $RUN_URL" \
-            'Contract-Version: 2' \
-            'Model: gpt-5.6-luna' \
-            'Reasoning: max' \
+            'Contract-Version: 3' \
             '' \
             "$FINDINGS")"
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$BODY"
@@ -70,5 +68,5 @@ jobs:
           gh api --method POST "repos/$REPO/statuses/$HEAD_SHA" \
             -f state="$STATUS_STATE" \
             -f context='governance/gate-b' \
-            -f description="Gate B $VERDICT from trusted Luna/max relay" \
+            -f description="Gate B $VERDICT from trusted independent-review relay" \
             -f target_url="$RUN_URL"

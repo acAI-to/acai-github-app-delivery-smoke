@@ -70,7 +70,7 @@ class PrMergeReadinessTests(unittest.TestCase):
                     "kind": "commit_status",
                     "name": "governance/gate-b",
                     "publisher": None,
-                    "workflow": ".github/workflows/luna-max-gate-b-relay.yml",
+                    "workflow": ".github/workflows/independent-review-gate-b-relay.yml",
                     "workflow_event": "workflow_dispatch",
                     "workflow_ref": "default_branch",
                     "workflow_status": "completed",
@@ -90,7 +90,7 @@ class PrMergeReadinessTests(unittest.TestCase):
             "kind": "commit_status",
             "name": "governance/gate-b",
             "publisher": None,
-            "workflow": ".github/workflows/luna-max-gate-b-relay.yml",
+            "workflow": ".github/workflows/independent-review-gate-b-relay.yml",
             "workflow_event": "workflow_dispatch",
             "workflow_ref": "default_branch",
             "workflow_status": "completed",
@@ -104,8 +104,8 @@ class PrMergeReadinessTests(unittest.TestCase):
         self.assertIn("required check is missing: governance/gate-b", pr_merge_readiness.evaluate(pr, [], contract)["blockers"])
         self.assertEqual("ready", pr_merge_readiness.evaluate(pr, [gate_b], contract)["status"])
 
-    def test_tier_two_accepts_legacy_terra_or_luna_gate_b_workflow(self):
-        contract = {"version": 2, "checks": [{"kind": "commit_status", "name": "governance/gate-b", "publisher": None, "workflows": [".github/workflows/luna-max-gate-b-relay.yml", ".github/workflows/terra-high-gate-b-relay.yml"], "workflow_event": "workflow_dispatch", "workflow_ref": "default_branch", "workflow_status": "completed", "workflow_conclusion": "success", "tiers": [2]}]}
+    def test_tier_two_accepts_declared_gate_b_workflow(self):
+        contract = {"version": 3, "checks": [{"kind": "commit_status", "name": "governance/gate-b", "publisher": None, "workflows": [".github/workflows/independent-review-gate-b-relay.yml"], "workflow_event": "workflow_dispatch", "workflow_ref": "default_branch", "workflow_status": "completed", "workflow_conclusion": "success", "tiers": [2]}]}
         pr = {"state": "OPEN", "is_draft": False, "head_sha": "a" * 40, "body": "Tier: governance/tier-2", "ready_event": {"id": "ready-1", "created_at": "2026-07-22T19:00:00Z"}}
         for workflow in contract["checks"][0]["workflows"]:
             with self.subTest(workflow=workflow):
@@ -298,17 +298,17 @@ class PrMergeReadinessTests(unittest.TestCase):
         gh.assert_called_once_with("api", "repos/acAI-to/acai-harness/actions/runs/12345")
 
     def test_preserves_workflow_dispatch_relay_identity(self):
-        relay = {"path": ".github/workflows/luna-max-gate-b-relay.yml@main", "head_sha": "b" * 40, "head_branch": "main", "event": "workflow_dispatch", "status": "completed", "conclusion": "success"}
+        relay = {"path": ".github/workflows/independent-review-gate-b-relay.yml@main", "head_sha": "b" * 40, "head_branch": "main", "event": "workflow_dispatch", "status": "completed", "conclusion": "success"}
         with patch.object(pr_merge_readiness, "_gh", return_value=relay):
             identity = pr_merge_readiness._workflow_identity_from_url("acAI-to/acai-harness", "https://github.com/acAI-to/acai-harness/actions/runs/12345", "a" * 40, "main", {})
 
         self.assertEqual(
-            {"workflow": ".github/workflows/luna-max-gate-b-relay.yml", "workflow_event": "workflow_dispatch", "workflow_ref": "default_branch", "workflow_status": "completed", "workflow_conclusion": "success"},
+            {"workflow": ".github/workflows/independent-review-gate-b-relay.yml", "workflow_event": "workflow_dispatch", "workflow_ref": "default_branch", "workflow_status": "completed", "workflow_conclusion": "success"},
             identity,
         )
 
     def test_rejects_workflow_dispatch_relay_from_pr_ref(self):
-        relay = {"path": ".github/workflows/luna-max-gate-b-relay.yml@feature", "head_sha": "a" * 40, "head_branch": "feature", "event": "workflow_dispatch", "status": "completed", "conclusion": "success"}
+        relay = {"path": ".github/workflows/independent-review-gate-b-relay.yml@feature", "head_sha": "a" * 40, "head_branch": "feature", "event": "workflow_dispatch", "status": "completed", "conclusion": "success"}
         with patch.object(pr_merge_readiness, "_gh", return_value=relay):
             identity = pr_merge_readiness._workflow_identity_from_url("acAI-to/acai-harness", "https://github.com/acAI-to/acai-harness/actions/runs/12345", "a" * 40, "main", {})
 

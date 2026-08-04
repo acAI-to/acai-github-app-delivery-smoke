@@ -3,7 +3,7 @@
 
 The harness governance loop requires an independent adversarial (Gate-B) review
 before a change is presented for merge. This makes that gate machine-checkable:
-a configured independent Luna/max reviewer posts a
+a configured independent reviewer posts a
 PR comment following the Gate-B contract, and CI turns the comment into a
 required `governance/gate-b` commit status.
 
@@ -12,7 +12,7 @@ Contract for the Gate-B comment (see docs/harness-governance-enforcement.md):
     <!-- ACAI-GATE-B -->
     Gate-B: PASS
     Commit: <full 40-character head sha reviewed>
-    Reviewer: luna-max
+    Reviewer: independent-review
     <findings / rationale>
 
 Rules:
@@ -68,10 +68,7 @@ def validate_relay_run(source_url: str, repository: str, relay_actor: str, allow
         return ["Gate-B relay Actions run returned malformed JSON"]
     reasons: list[str] = []
     workflow = str(run.get("path", "")).split("@", 1)[0]
-    expected_workflow = {
-        "terra-high": ".github/workflows/terra-high-gate-b-relay.yml",
-        "luna-max": ".github/workflows/luna-max-gate-b-relay.yml",
-    }.get(reviewer)
+    expected_workflow = ".github/workflows/independent-review-gate-b-relay.yml"
     if run.get("event") != "workflow_dispatch" or workflow != expected_workflow:
         reasons.append("Gate-B source is not a trusted role-routed relay workflow")
     if run.get("html_url") != source_url:
@@ -96,7 +93,7 @@ def evaluate(
     reviewer_logins: set[str] | None = None,
     repository: str = "",
     source_validator: Callable[[str, str, str, set[str]], list[str]] | None = None,
-    luna_max_reviewer_logins: set[str] | None = None,
+    independent_reviewer_logins: set[str] | None = None,
 ):
     """Return (passed: bool, reason: str) for the Gate-B artifact.
 
@@ -120,14 +117,12 @@ def evaluate(
     author = str((latest.get("user") or {}).get("login", ""))
     if author not in BOT_LOGINS:
         return False, "latest Gate-B artifact must be authored by the trusted GitHub Actions relay"
-    luna = re.search(r"(?im)^Reviewer:\s*luna-max\s*$", body) is not None
-    terra = re.search(r"(?im)^Reviewer:\s*terra-high\s*$", body) is not None
-    if not luna and not terra:
-        return False, "latest Gate-B artifact does not identify Reviewer: terra-high or luna-max"
-    if luna and (_field(body, "Model") != "gpt-5.6-luna" or _field(body, "Reasoning") != "max" or _field(body, "Contract-Version") != "2"):
-        return False, "Luna/max Gate-B route evidence is incomplete"
-    reviewer = "luna-max" if luna else "terra-high"
-    allowed = (luna_max_reviewer_logins if luna and luna_max_reviewer_logins is not None else reviewer_logins) or set()
+    reviewer = _field(body, "Reviewer")
+    if reviewer != "independent-review":
+        return False, "latest Gate-B artifact does not identify Reviewer: independent-review"
+    if _field(body, "Contract-Version") != "3":
+        return False, "independent Gate-B contract version is missing or stale"
+    allowed = independent_reviewer_logins or reviewer_logins or set()
     relay_actor = _field(body, "Relay-Actor")
     source_url = _field(body, "Source-URL")
     session = _field(body, "Session")
@@ -179,11 +174,11 @@ def evaluate(
 def evaluate_pr(
     comments, head_sha: str, *, is_draft: bool, reviewer_logins: set[str] | None = None,
     repository: str = "", source_validator: Callable[[str, str, str, set[str]], list[str]] | None = None,
-    luna_max_reviewer_logins: set[str] | None = None,
+    independent_reviewer_logins: set[str] | None = None,
 ):
     if is_draft:
         return True, "Gate B pending: draft PR"
-    return evaluate(comments, head_sha, reviewer_logins, repository, source_validator, luna_max_reviewer_logins)
+    return evaluate(comments, head_sha, reviewer_logins, repository, source_validator, independent_reviewer_logins)
 
 
 def main() -> int:
@@ -199,10 +194,9 @@ def main() -> int:
     if not isinstance(comments, list):
         print("comments payload was not a JSON array")
         return 1
-    allowed = {value.strip() for value in os.environ.get("ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS", "").split(",") if value.strip()}
-    luna_allowed = {value.strip() for value in os.environ.get("ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS", "").split(",") if value.strip()}
+    allowed = {value.strip() for value in os.environ.get("ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS", "").split(",") if value.strip()}
     repository = os.environ.get("GITHUB_REPOSITORY", "")
-    passed, reason = evaluate_pr(comments, head_sha, is_draft=is_draft, reviewer_logins=allowed, repository=repository, luna_max_reviewer_logins=luna_allowed)
+    passed, reason = evaluate_pr(comments, head_sha, is_draft=is_draft, reviewer_logins=allowed, repository=repository)
     print(reason)
     return 0 if passed else 1
 

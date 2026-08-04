@@ -55,7 +55,7 @@ jobs:
           SOURCE_PR: ${{ inputs.source_pr }}
           RUN_ID: ${{ github.run_id }}
           OPERATOR_LOGINS: ${{ vars.ACAI_OPERATOR_GITHUB_LOGINS }}
-          TERRA_HIGH_REVIEW_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
+          INDEPENDENT_REVIEW_LOGINS: ${{ vars.ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS }}
         run: |
           set -euo pipefail
           DEFAULT_BRANCH="$(gh repo view "$REPO" --json defaultBranchRef -q .defaultBranchRef.name)"
@@ -83,15 +83,37 @@ jobs:
           except (ValueError, UnicodeDecodeError) as exc:
               raise SystemExit(f'release pin is malformed: {exc}')
           canonical = (json.dumps(pin, sort_keys=True, separators=(',', ':'), ensure_ascii=True) + '\n').encode()
-          required = {'schema','source_repository','source_pr','manifest_sha256','manifest_source_commit','governance_allowlists'}
-          if not isinstance(pin, dict) or set(pin) != required or raw != canonical:
+          legacy_required = {'schema','source_repository','source_pr','manifest_sha256','manifest_source_commit','governance_allowlists'}
+          v4_required = legacy_required | {'package_release'}
+          if not isinstance(pin, dict) or raw != canonical:
               raise SystemExit('release pin is not canonical or has an unsupported schema')
-          if pin['schema'] != 'acai-governance-deployment-pin/v3' or pin['source_repository'] != repository or pin['source_pr'] != int(source_pr):
+          if pin.get('schema') == 'acai-governance-deployment-pin/v3':
+              required = legacy_required
+          elif pin.get('schema') == 'acai-governance-deployment-pin/v4':
+              required = v4_required
+          else:
+              raise SystemExit('release pin is not canonical or has an unsupported schema')
+          if set(pin) != required:
+              raise SystemExit('release pin is not canonical or has an unsupported schema')
+          if pin['source_repository'] != repository or pin['source_pr'] != int(source_pr):
               raise SystemExit('release pin does not bind the selected source repository and PR')
           if not re.fullmatch(r'[0-9a-f]{40}', str(pin['manifest_source_commit'])) or not re.fullmatch(r'[0-9a-f]{64}', str(pin['manifest_sha256'])):
               raise SystemExit('release pin immutable identity is malformed')
           if not isinstance(pin['governance_allowlists'], dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in pin['governance_allowlists'].items()):
               raise SystemExit('release pin allowlists are malformed')
+          if pin['schema'] == 'acai-governance-deployment-pin/v4':
+              release = pin['package_release']
+              package_release_required = {'release_commit_sha','package_content_digest','oci_manifest_digest','signer_sha'}
+              if not isinstance(release, dict) or set(release) != package_release_required:
+                  raise SystemExit('release pin package release identity is malformed')
+              if (
+                  not re.fullmatch(r'[0-9a-f]{40}', str(release.get('release_commit_sha', '')))
+                  or not re.fullmatch(r'[0-9a-f]{64}', str(release.get('package_content_digest', '')))
+                  or not re.fullmatch(r'sha256:[0-9a-f]{64}', str(release.get('oci_manifest_digest', '')))
+                  or not re.fullmatch(r'[0-9a-f]{40}', str(release.get('signer_sha', '')))
+                  or pin['governance_allowlists'].get('ACAI_GOVERNANCE_PACKAGE_RELEASE_SHA') != release['release_commit_sha']
+              ):
+                  raise SystemExit('release pin package release identity is malformed')
           print(pin['manifest_source_commit'])
           print(pin['manifest_sha256'])
           PY
@@ -146,6 +168,6 @@ jobs:
           validate_one_json_document tree.json array
           validate_one_json_document source-pr-commits.json array
           validate_one_json_document associated-prs.json array
-          jq -n --arg repository "$REPO" --arg default_branch "$DEFAULT_BRANCH" --arg manifest_path "$GITHUB_WORKSPACE/source-manifest.json" --arg manifest_carrier "$CARRIER" --arg manifest_asset_commit "$ASSET" --arg expected_manifest_sha256 "$EXPECTED_MANIFEST_SHA256" --arg operator "$OPERATOR_LOGINS" --arg terra "$TERRA_HIGH_REVIEW_LOGINS" --slurpfile source_pr source-pr.json --slurpfile issue issue.json --slurpfile comments comments.json --slurpfile timeline timeline.json --slurpfile run run.json --slurpfile tree tree.json --slurpfile associated_prs associated-prs.json '{repository:$repository,default_branch:$default_branch,manifest_path:$manifest_path,manifest_carrier:$manifest_carrier,manifest_asset_commit:$manifest_asset_commit,manifest_asset_contained:true,expected_manifest_sha256:$expected_manifest_sha256,source_pr:$source_pr[0],issue:$issue[0],comments:$comments[0],timeline:$timeline[0],run:$run[0],tree:$tree[0],source_contained:true,associated_prs:$associated_prs[0],operator_logins:($operator|split(",")|map(select(length>0))),terra_high_review_logins:($terra|split(",")|map(select(length>0)))}' > release-input.json
+          jq -n --arg repository "$REPO" --arg default_branch "$DEFAULT_BRANCH" --arg manifest_path "$GITHUB_WORKSPACE/source-manifest.json" --arg manifest_carrier "$CARRIER" --arg manifest_asset_commit "$ASSET" --arg expected_manifest_sha256 "$EXPECTED_MANIFEST_SHA256" --arg operator "$OPERATOR_LOGINS" --arg independent "$INDEPENDENT_REVIEW_LOGINS" --slurpfile source_pr source-pr.json --slurpfile issue issue.json --slurpfile comments comments.json --slurpfile timeline timeline.json --slurpfile run run.json --slurpfile tree tree.json --slurpfile associated_prs associated-prs.json '{repository:$repository,default_branch:$default_branch,manifest_path:$manifest_path,manifest_carrier:$manifest_carrier,manifest_asset_commit:$manifest_asset_commit,manifest_asset_contained:true,expected_manifest_sha256:$expected_manifest_sha256,source_pr:$source_pr[0],issue:$issue[0],comments:$comments[0],timeline:$timeline[0],run:$run[0],tree:$tree[0],source_contained:true,associated_prs:$associated_prs[0],operator_logins:($operator|split(",")|map(select(length>0))),independent_review_logins:($independent|split(",")|map(select(length>0)))}' > release-input.json
           python3 scripts/governance_release.py publish < release-input.json > release-attestation.md
           gh issue comment "$ISSUE" --repo "$REPO" --body-file release-attestation.md
