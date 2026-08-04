@@ -203,26 +203,73 @@ def tree_details(repo: str, sha: str, paths: list[str], statuses: dict[str, str]
     return details
 
 
+def validate_first_install_base_tree(
+    entries: Any, new_paths: set[str], *, truncated: Any,
+) -> list[dict[str, str]]:
+    """Return canonical exact-base evidence only for a clean first install."""
+    error = "first install requires a complete clean exact base"
+    if truncated is not False or not isinstance(entries, list):
+        raise RuntimeError(error)
+    canonical_entries: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in entries:
+        if not isinstance(item, dict):
+            raise RuntimeError(error)
+        path, mode, kind, sha = item.get("path"), item.get("mode"), item.get("type"), item.get("sha")
+        if (
+            not isinstance(path, str) or not path or path.startswith("/") or "\\" in path
+            or any(part in {"", ".", ".."} for part in path.split("/"))
+            or path in seen or not isinstance(mode, str)
+            or not re.fullmatch(r"(?:040000|100644|100755|120000|160000)", mode)
+            or kind not in {"blob", "tree", "commit"}
+            or (kind == "tree" and mode != "040000")
+            or (kind == "commit" and mode != "160000")
+            or (kind == "blob" and mode not in {"100644", "100755", "120000"})
+            or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)
+        ):
+            raise RuntimeError(error)
+        seen.add(path)
+        canonical_entries.append({"path": path, "mode": mode, "type": kind, "sha": sha})
+    def governed(path: str) -> bool:
+        name = path.rsplit("/", 1)[-1]
+        return (
+            path in new_paths
+            or path.startswith((".acai/governance-", "governance/", ".github/actions/acai-hermetic-execution/", ".github/ISSUE_TEMPLATE/governed-change"))
+            or (path.startswith(".github/workflows/") and any(token in name for token in ("governance", "plan-approval", "plan-review", "gate-b-relay")))
+            or path == "bin/pr-merge-readiness"
+            or (path.startswith("scripts/") and (name.startswith("governance_") or name in {"check_change_pr.py", "check_gate_b.py", "director_pr_lookup.sh", "plan_approval.py", "pr_merge_readiness.py", "tier_policy.py", "validation_profile.py"}))
+            or (path.startswith("tests/") and (name.startswith("test_governance_") or name in {"test_pr_merge_readiness.py", "test_validation_profile.py"}))
+        )
+    if any(governed(path) for path in seen):
+        raise RuntimeError(error)
+    return canonical_entries
+
+
 def _state_and_diff_digests(
-    repo: str, *, head: str, base: str, manifest: dict[str, Any], manifest_carrier: str, prior_manifest: dict[str, Any] | None = None, prior_variants: object = None
+    repo: str, *, head: str, base: str, manifest: dict[str, Any], manifest_carrier: str, prior_manifest: dict[str, Any] | None = None, prior_variants: object = None, first_install: bool = False
 ) -> tuple[str, str, str, dict[str, dict[str, str]], dict[str, dict[str, str]], bytes, bytes]:
     state_path = ".acai/governance-bootstrap.json"
     try:
         head_bytes = content_bytes(repo, state_path, head)
-        base_bytes = content_bytes(repo, state_path, base)
-        base_state = json.loads(base_bytes)
         head_state = json.loads(head_bytes)
+        if first_install:
+            base_bytes, base_state = b"", None
+        else:
+            base_bytes = content_bytes(repo, state_path, base)
+            base_state = json.loads(base_bytes)
     except (RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError("target bootstrap state is missing, malformed, or stale") from exc
-    if not isinstance(base_state, dict) or not isinstance(head_state, dict):
+    if (not first_install and not isinstance(base_state, dict)) or not isinstance(head_state, dict):
         raise RuntimeError("target bootstrap state is missing, malformed, or stale")
-    if not isinstance(prior_manifest, dict):
+    if first_install and prior_manifest is not None:
+        raise RuntimeError("first install has unexpected prior manifest evidence")
+    if not first_install and not isinstance(prior_manifest, dict):
         raise RuntimeError("target prior attested manifest is unavailable")
     settings_digest = str(head_state.get("settings_owner", ""))
-    old = closure_from_manifest(prior_manifest)
+    old = {} if first_install else closure_from_manifest(prior_manifest)
     new = closure_from_manifest(manifest)
-    state_paths = base_state.get("files")
-    if not isinstance(state_paths, list) or len(state_paths) != len(set(state_paths)) or set(state_paths) != set(old):
+    state_paths = base_state.get("files") if isinstance(base_state, dict) else []
+    if not first_install and (not isinstance(state_paths, list) or len(state_paths) != len(set(state_paths)) or set(state_paths) != set(old)):
         raise RuntimeError("target base bootstrap state does not bind the prior attested closure")
     manifest_paths = set(new)
     head_paths = head_state.get("files")
@@ -239,7 +286,8 @@ def _state_and_diff_digests(
         raise RuntimeError("target bootstrap settings digest is malformed")
     old_details = tree_details(repo, base, sorted(old), {path: "U" for path in old})
     actual_old = {item["path"]: {"mode": item.get("mode"), "sha256": item.get("sha256")} for item in old_details if item.get("deleted") is False and item.get("type") == "blob"}
-    old = complete_historical_closure(old, prior_variants, actual_old)
+    if not first_install:
+        old = complete_historical_closure(old, prior_variants, actual_old)
     head_details = tree_details(repo, head, sorted(new), {path: "U" for path in new})
     actual_new = {item["path"]: {"mode": item.get("mode"), "sha256": item.get("sha256")} for item in head_details if item.get("deleted") is False and item.get("type") == "blob"}
     if actual_new != new:
@@ -306,41 +354,53 @@ def collect(source_repo: str, source_pr_number: int, target_repo: str, target_pr
     try:
         base_state_bytes = content_bytes(target_repo, ".acai/governance-bootstrap.json", str(target_base))
         base_state = json.loads(base_state_bytes)
-    except (RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("target base bootstrap state is unavailable") from exc
-    old_source_commit = base_state.get("source_commit") if isinstance(base_state, dict) else None
-    old_manifest_carrier = (
-        base_state.get("source_commit")
-        if isinstance(base_state, dict) and base_state.get("manifest_version") == 3
-        else base_state.get("manifest_source_commit") if isinstance(base_state, dict) else None
-    )
-    old_source_repository = base_state.get("source_repository", source_repo) if isinstance(base_state, dict) else source_repo
-    if not isinstance(old_source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", old_source_commit) or not isinstance(old_manifest_carrier, str) or not re.fullmatch(r"[0-9a-f]{40}", old_manifest_carrier) or old_source_repository != source_repo:
-        raise RuntimeError("target base bootstrap provenance is stale")
-    prior_manifest_bytes = content_bytes(source_repo, MANIFEST_PATH, old_manifest_carrier)
-    try:
-        prior_manifest = json.loads(prior_manifest_bytes)
-    except (ValueError, UnicodeDecodeError) as exc:
-        raise RuntimeError("prior source manifest bytes are malformed") from exc
-    expected_prior_digest = base_state.get("manifest_sha256") if isinstance(base_state, dict) else None
-    if base_state.get("manifest_version") == 3 and isinstance(manifest.get("settings"), dict):
-        expected_prior_digest, prior_variants = historical_variant_reference(
-            manifest, old_manifest_carrier
+        first_install = False
+    except (RuntimeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        first_install = True
+        base_state_bytes, base_state = b"", None
+    if first_install:
+        base_repository = one(f"repos/{target_repo}/git/trees/{target_base}?recursive=1")
+        base_entries = base_repository.get("tree") if isinstance(base_repository, dict) else None
+        base_truncated = base_repository.get("truncated") if isinstance(base_repository, dict) else None
+        base_repository_tree = validate_first_install_base_tree(
+            base_entries, set(manifest_paths), truncated=base_truncated,
         )
+        prior_manifest_bytes, prior_manifest, prior_variants = b"", None, None
     else:
-        prior_variants = None
-    prior_asset_matches = (
-        isinstance(prior_manifest.get("source_commit"), str)
-        and re.fullmatch(r"[0-9a-f]{40}", prior_manifest["source_commit"])
-        and (
-            base_state.get("manifest_version") == 3
-            or prior_manifest.get("source_commit") == old_source_commit
+        base_repository_tree, base_truncated = [], False
+        old_source_commit = base_state.get("source_commit") if isinstance(base_state, dict) else None
+        old_manifest_carrier = (
+            base_state.get("source_commit")
+            if isinstance(base_state, dict) and base_state.get("manifest_version") == 3
+            else base_state.get("manifest_source_commit") if isinstance(base_state, dict) else None
         )
-    )
-    if not isinstance(expected_prior_digest, str) or hashlib.sha256(prior_manifest_bytes).hexdigest() != expected_prior_digest or not prior_asset_matches:
-        raise RuntimeError("target base bootstrap manifest provenance is stale")
+        old_source_repository = base_state.get("source_repository", source_repo) if isinstance(base_state, dict) else source_repo
+        if not isinstance(old_source_commit, str) or not re.fullmatch(r"[0-9a-f]{40}", old_source_commit) or not isinstance(old_manifest_carrier, str) or not re.fullmatch(r"[0-9a-f]{40}", old_manifest_carrier) or old_source_repository != source_repo:
+            raise RuntimeError("target base bootstrap provenance is stale")
+        prior_manifest_bytes = content_bytes(source_repo, MANIFEST_PATH, old_manifest_carrier)
+        try:
+            prior_manifest = json.loads(prior_manifest_bytes)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise RuntimeError("prior source manifest bytes are malformed") from exc
+        expected_prior_digest = base_state.get("manifest_sha256") if isinstance(base_state, dict) else None
+        if base_state.get("manifest_version") == 3 and isinstance(manifest.get("settings"), dict):
+            expected_prior_digest, prior_variants = historical_variant_reference(
+                manifest, old_manifest_carrier
+            )
+        else:
+            prior_variants = None
+        prior_asset_matches = (
+            isinstance(prior_manifest.get("source_commit"), str)
+            and re.fullmatch(r"[0-9a-f]{40}", prior_manifest["source_commit"])
+            and (
+                base_state.get("manifest_version") == 3
+                or prior_manifest.get("source_commit") == old_source_commit
+            )
+        )
+        if not isinstance(expected_prior_digest, str) or hashlib.sha256(prior_manifest_bytes).hexdigest() != expected_prior_digest or not prior_asset_matches:
+            raise RuntimeError("target base bootstrap manifest provenance is stale")
     state_digest, diff_digest, settings_digest, old_closure, new_closure, _, head_state_bytes = _state_and_diff_digests(
-        target_repo, head=str(target_head), base=str(target_base), manifest=manifest, manifest_carrier=carrier, prior_manifest=prior_manifest, prior_variants=prior_variants
+        target_repo, head=str(target_head), base=str(target_base), manifest=manifest, manifest_carrier=carrier, prior_manifest=prior_manifest, prior_variants=prior_variants, first_install=first_install
     )
     files = pages(f"repos/{target_repo}/pulls/{target_pr_number}/files?per_page=100")
     deployment_comments = pages(
@@ -356,7 +416,7 @@ def collect(source_repo: str, source_pr_number: int, target_repo: str, target_pr
     for path, entry in old_closure.items():
         if path not in new_closure and path in statuses:
             details[path] = {"path": path, "status": statuses[path], "deleted": True, **entry}
-    return {"repository": source_repo, "source_pr": source_pr, "issue": issue, "comments": comments, "timeline": timeline, "attestation": attestation, "run": run, "default_contained": contained, "associated_prs": associated, "source_manifest_carrier": carrier, "source_manifest_bytes_base64": base64.b64encode(manifest_bytes).decode("ascii"), "source_tree": source_tree, "target": {"repository": target_repo, "pr": target_pr_number, "head": target_head, "base": target_base, "body": body, "body_digest": body_digest(body), "state_digest": state_digest, "diff_digest": diff_digest, "old_closure_digest": closure_digest(old_closure), "new_closure_digest": closure_digest(new_closure), "settings_digest": settings_digest, "base_state_bytes_base64": base64.b64encode(base_state_bytes).decode("ascii"), "head_state_bytes_base64": base64.b64encode(head_state_bytes).decode("ascii"), "prior_manifest_bytes_base64": base64.b64encode(prior_manifest_bytes).decode("ascii"), "base_tree": tree_details(target_repo, str(target_base), sorted(old_closure), {path: "U" for path in old_closure}), "head_tree": tree_details(target_repo, str(target_head), sorted(new_closure), {path: "U" for path in new_closure}), "diff_paths": target_paths, "file_details": details, "deployment_comments": deployment_comments}, "pagination_complete": True}
+    return {"repository": source_repo, "source_pr": source_pr, "issue": issue, "comments": comments, "timeline": timeline, "attestation": attestation, "run": run, "default_contained": contained, "associated_prs": associated, "source_manifest_carrier": carrier, "source_manifest_bytes_base64": base64.b64encode(manifest_bytes).decode("ascii"), "source_tree": source_tree, "target": {"repository": target_repo, "pr": target_pr_number, "head": target_head, "base": target_base, "body": body, "body_digest": body_digest(body), "state_digest": state_digest, "diff_digest": diff_digest, "old_closure_digest": closure_digest(old_closure), "new_closure_digest": closure_digest(new_closure), "settings_digest": settings_digest, "installation_mode": "first-install" if first_install else "upgrade", "base_repository_tree": base_repository_tree, "base_repository_tree_truncated": base_truncated, "base_state_bytes_base64": base64.b64encode(base_state_bytes).decode("ascii"), "head_state_bytes_base64": base64.b64encode(head_state_bytes).decode("ascii"), "prior_manifest_bytes_base64": base64.b64encode(prior_manifest_bytes).decode("ascii"), "base_tree": tree_details(target_repo, str(target_base), sorted(old_closure), {path: "U" for path in old_closure}), "head_tree": tree_details(target_repo, str(target_head), sorted(new_closure), {path: "U" for path in new_closure}), "diff_paths": target_paths, "file_details": details, "deployment_comments": deployment_comments}, "pagination_complete": True}
 
 
 def main() -> int:

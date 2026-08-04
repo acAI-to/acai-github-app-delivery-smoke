@@ -13,7 +13,7 @@ import validation_profile
 
 
 PHASES = (
-    "issue-plan", "luna-max-plan-review", "approval", "draft-pr",
+    "issue-plan", "independent-plan-review", "approval", "draft-pr",
     "implementation", "gate-a", "gate-b", "ready-for-review",
 )
 
@@ -35,8 +35,8 @@ def evaluate(root: Path, paths: list[str], metadata: dict[str, Any], phase: str)
             "required_tier": tier_policy.minimum_tier(tier, paths, metadata), "validation": selected_profile,
         }
     transitions = {
-        "issue-plan": "luna-max-plan-review" if declared_tier == 2 else ("approval" if declared_tier == 1 else "draft-pr"),
-        "luna-max-plan-review": "approval",
+        "issue-plan": "independent-plan-review" if declared_tier == 2 else ("approval" if declared_tier == 1 else "draft-pr"),
+        "independent-plan-review": "approval",
         "approval": "draft-pr",
         "draft-pr": "implementation",
         "implementation": "gate-a",
@@ -46,12 +46,12 @@ def evaluate(root: Path, paths: list[str], metadata: dict[str, Any], phase: str)
     }
     next_phase = transitions[phase]
     actions = {
-        "luna-max-plan-review": "request Luna/max adversarial plan review",
+        "independent-plan-review": "request independent adversarial plan review",
         "approval": "request the tier-specific approval artifact",
         "draft-pr": "create issue-linked branch and draft PR",
         "implementation": "begin implementation",
         "gate-a": "run Gate A validation",
-        "gate-b": "request exact-head Luna/max Gate B",
+        "gate-b": "request exact-head independent Gate B",
         "ready-for-review": "mark the PR ready for operator review",
     }
     return {

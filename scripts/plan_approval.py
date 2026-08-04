@@ -14,8 +14,7 @@ from urllib.parse import urlparse
 
 APPROVAL_LABEL = "acai-plan-approved"
 ATTESTATION_MARKER = "<!-- ACAI-PLAN-APPROVAL -->"
-PLAN_REVIEW_MARKER = "<!-- ACAI-TERRA-HIGH-PLAN-REVIEW -->"
-LUNA_PLAN_REVIEW_MARKER = "<!-- ACAI-LUNA-MAX-PLAN-REVIEW -->"
+PLAN_REVIEW_MARKER = "<!-- ACAI-INDEPENDENT-PLAN-REVIEW -->"
 # Operator approval fixes the outcome and acceptance criteria. Execution-plan
 # refinement belongs to the agents and must not churn the operator label.
 MATERIAL_HEADINGS = ("Goal", "Fixed rubric", "Non-goals")
@@ -138,7 +137,7 @@ def latest_plan_review(comments: list[dict[str, Any]]) -> dict[str, Any] | None:
     marked = [
         (position, comment)
         for position, comment in enumerate(comments)
-        if isinstance(comment, dict) and (PLAN_REVIEW_MARKER in str(comment.get("body", "")) or LUNA_PLAN_REVIEW_MARKER in str(comment.get("body", "")))
+        if isinstance(comment, dict) and PLAN_REVIEW_MARKER in str(comment.get("body", ""))
     ]
     def newest_key(item: tuple[int, dict[str, Any]]) -> tuple[str, int, int]:
         position, comment = item
@@ -174,23 +173,22 @@ def parse_attestation(comment: dict[str, Any] | None) -> tuple[dict[str, str], l
 
 def validate_plan_review(
     *, repository: str, issue: dict[str, Any], comment: dict[str, Any] | None, allowlist: set[str],
-    luna_allowlist: set[str] | None = None,
+    independent_allowlist: set[str] | None = None,
 ) -> list[str]:
-    """Validate legacy Terra/high or future Luna/max plan-review evidence."""
+    """Validate model-agnostic independent plan-review evidence."""
     if not comment:
         return ["missing independent plan-review artifact"]
     reasons: list[str] = []
     body = str(comment.get("body", ""))
     author = str((comment.get("user") or {}).get("login", ""))
-    is_luna = LUNA_PLAN_REVIEW_MARKER in body
     adversarial_profile = _line(str(issue.get("body", "")), "Adversarial profile")
-    trusted_authors = luna_allowlist if is_luna and luna_allowlist is not None else allowlist
+    trusted_authors = independent_allowlist or allowlist
     if author not in trusted_authors:
         reasons.append("plan-review author is not allowlisted")
-    if (is_luna and "LUNA_MAX_PLAN_APPROVED" not in body) or (not is_luna and (PLAN_REVIEW_MARKER not in body or "TERRA_HIGH_PLAN_APPROVED" not in body)):
+    if PLAN_REVIEW_MARKER not in body or "INDEPENDENT_PLAN_APPROVED" not in body:
         reasons.append("plan-review marker or approval verdict is missing")
-    if not is_luna and adversarial_profile != "terra-high":
-        reasons.append("legacy Terra/high plan review requires Adversarial profile: terra-high")
+    if adversarial_profile != "independent-review":
+        reasons.append("plan review requires Adversarial profile: independent-review")
     fields = {name: _line(body, name) for name in ("Repository", "Issue", "Purpose", "Digest-SHA256", "Reviewer", "Session", "Verdict")}
     if any(not value for value in fields.values()):
         reasons.append("plan-review artifact fields are incomplete")
@@ -199,12 +197,11 @@ def validate_plan_review(
         reasons.append("plan-review repository/issue does not match")
     if fields["Purpose"] != "plan-review":
         reasons.append("plan-review purpose must be plan-review")
-    expected_reviewer = "luna-max" if is_luna else "terra-high"
+    expected_reviewer = "independent-review"
     if fields["Reviewer"] != expected_reviewer:
-        reasons.append(("Luna/max" if is_luna else "Terra/high") + f" plan-review reviewer must be {expected_reviewer}")
-    if is_luna:
-        if _line(body, "Model") != "gpt-5.6-luna" or _line(body, "Reasoning") != "max" or _line(body, "Contract-Version") != "2":
-            reasons.append("Luna/max plan-review route evidence is incomplete")
+        reasons.append(f"plan-review reviewer must be {expected_reviewer}")
+    if _line(body, "Contract-Version") != "3":
+        reasons.append("independent plan-review contract version is missing or stale")
     expected = plan_review_digest(str(issue.get("body", "")))
     if not re.fullmatch(r"[0-9a-f]{64}", fields["Digest-SHA256"]) or fields["Digest-SHA256"] != expected:
         reasons.append("plan-review digest is stale or malformed")

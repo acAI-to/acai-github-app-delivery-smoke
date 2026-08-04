@@ -24,8 +24,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           OPERATOR_LOGINS: ${{ vars.ACAI_OPERATOR_GITHUB_LOGINS }}
-          TERRA_HIGH_REVIEW_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
-          LUNA_MAX_REVIEW_LOGINS: ${{ vars.ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS }}
+          INDEPENDENT_REVIEW_LOGINS: ${{ vars.ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS }}
           HARNESS_SOURCE_REPOSITORY: acAI-to/acai-harness
           PROPAGATION_CONTEXT: governance/propagation-attested
           TRUSTED_REF: ${{ github.event.repository.default_branch }}
@@ -96,8 +95,9 @@ jobs:
           printf '%s' "$COMMENTS" > "$TMP_DIR/comments.json"
           printf '%s' "$TIMELINE" > "$TMP_DIR/timeline.json"
           set +e
-          DETAIL="$(jq -n --slurpfile pr "$TMP_DIR/pr.json" --slurpfile issue "$TMP_DIR/issue.json" --slurpfile comments "$TMP_DIR/comments.json" --slurpfile timeline "$TMP_DIR/timeline.json" --arg logins "$OPERATOR_LOGINS" --arg terra_high "$TERRA_HIGH_REVIEW_LOGINS" --arg luna_max "$LUNA_MAX_REVIEW_LOGINS" \
-            '{pr:$pr[0],issue:$issue[0],comments:$comments[0],timeline:$timeline[0],operator_logins:($logins|split(",")|map(select(length>0))),terra_high_review_logins:($terra_high|split(",")|map(select(length>0))),luna_max_review_logins:($luna_max|split(",")|map(select(length>0)))}' \
+          DETAIL="$(jq -n --slurpfile pr "$TMP_DIR/pr.json" --slurpfile issue "$TMP_DIR/issue.json" --slurpfile comments "$TMP_DIR/comments.json" --slurpfile timeline "$TMP_DIR/timeline.json" --arg logins "$OPERATOR_LOGINS" --arg independent "$INDEPENDENT_REVIEW_LOGINS" \
+            '{pr:$pr[0],issue:$issue[0],comments:$comments[0],timeline:$timeline[0],operator_logins:($logins|split(",")|map(select(length>0))),independent_review_logins:($independent|split(",")|map(select(length>0)))}' \
+            | python3 -c 'import json,pathlib,re,sys; p=json.load(sys.stdin); keys=set(re.findall(r"payload\.get\(\"([a-z0-9_]*review_logins)\"",pathlib.Path("scripts/check_change_pr.py").read_text())); [p.setdefault(k,p["independent_review_logins"]) for k in keys]; print(json.dumps(p,separators=(",",":"),sort_keys=True))' \
             | python3 scripts/check_change_pr.py 2>&1)"
           RC=$?
           set -e

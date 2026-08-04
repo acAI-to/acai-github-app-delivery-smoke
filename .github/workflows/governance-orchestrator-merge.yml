@@ -40,7 +40,7 @@ jobs:
           PR: ${{ inputs.pr }}
           OPERATOR_LOGINS: ${{ vars.ACAI_OPERATOR_GITHUB_LOGINS }}
           DIRECTOR_LOGINS: ${{ vars.ACAI_DIRECTOR_GITHUB_LOGINS }}
-          TERRA_HIGH_REVIEW_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
+          INDEPENDENT_REVIEW_LOGINS: ${{ vars.ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS }}
         run: |
           set -euo pipefail
           PR_JSON="$(gh pr view "$PR" --repo "$REPO" --json number,state,isDraft,headRefName,baseRefName,headRefOid,mergeable,mergeStateStatus,body,reviews)"
@@ -116,7 +116,7 @@ jobs:
             ISSUE_JSON="$(gh api "repos/$REPO/issues/$ISSUE")"
             COMMENTS="$(gh api --paginate "repos/$REPO/issues/$ISSUE/comments?per_page=100" | jq -s 'add // []')"
             TIMELINE="$(gh api --paginate "repos/$REPO/issues/$ISSUE/timeline?per_page=100" | jq -s 'add // []')"
-            jq -n --argjson pr "$PR_JSON" --argjson issue "$ISSUE_JSON" --argjson comments "$COMMENTS" --argjson timeline "$TIMELINE" --arg operator "$OPERATOR_LOGINS" --arg director "$DIRECTOR_LOGINS" --arg terra "$TERRA_HIGH_REVIEW_LOGINS" '{pr:$pr,issue:$issue,comments:$comments,timeline:$timeline,operator_logins:($operator|split(",")|map(select(length>0))),director_logins:($director|split(",")|map(select(length>0))),terra_high_review_logins:($terra|split(",")|map(select(length>0)))}' | python3 scripts/check_change_pr.py
+            jq -n --argjson pr "$PR_JSON" --argjson issue "$ISSUE_JSON" --argjson comments "$COMMENTS" --argjson timeline "$TIMELINE" --arg operator "$OPERATOR_LOGINS" --arg director "$DIRECTOR_LOGINS" --arg independent "$INDEPENDENT_REVIEW_LOGINS" '{pr:$pr,issue:$issue,comments:$comments,timeline:$timeline,operator_logins:($operator|split(",")|map(select(length>0))),director_logins:($director|split(",")|map(select(length>0))),independent_review_logins:($independent|split(",")|map(select(length>0)))}' | python3 scripts/check_change_pr.py
           fi
           if [ "$(printf '%s' "$PROPAGATION" | jq '.reasons | length')" != 0 ]; then
             PROPAGATION_VALID=false

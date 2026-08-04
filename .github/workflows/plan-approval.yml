@@ -25,8 +25,7 @@ jobs:
           EVENT_LABEL: ${{ github.event.label.name }}
           EVENT_ACTOR: ${{ github.event.sender.login }}
           OPERATOR_LOGINS: ${{ vars.ACAI_OPERATOR_GITHUB_LOGINS }}
-          LUNA_MAX_REVIEW_LOGINS: ${{ vars.ACAI_LUNA_MAX_REVIEW_GITHUB_LOGINS }}
-          TERRA_HIGH_REVIEW_LOGINS: ${{ vars.ACAI_CODEX_ALTERNATIVE_REVIEW_GITHUB_LOGINS }}
+          INDEPENDENT_REVIEW_LOGINS: ${{ vars.ACAI_INDEPENDENT_REVIEW_GITHUB_LOGINS }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           TRUSTED_REF: ${{ github.event.repository.default_branch }}
           TRUSTED_ROOT: ${{ runner.temp }}/trusted-governance
@@ -57,15 +56,14 @@ jobs:
               exit 0
             fi
             COMMENTS="$(gh api --paginate "repos/$REPO/issues/$ISSUE_NUMBER/comments?per_page=100" | jq -s 'add // []')"
-          if ! ISSUE_JSON="$ISSUE" COMMENTS_JSON="$COMMENTS" python3 - "$REPO" "$LUNA_MAX_REVIEW_LOGINS" "$TERRA_HIGH_REVIEW_LOGINS" <<'PY'
+          if ! ISSUE_JSON="$ISSUE" COMMENTS_JSON="$COMMENTS" python3 - "$REPO" "$INDEPENDENT_REVIEW_LOGINS" <<'PY'
           import json, os, sys
           from scripts.plan_approval import latest_plan_review, validate_plan_review
           issue = json.loads(os.environ["ISSUE_JSON"])
           comments = json.loads(os.environ["COMMENTS_JSON"])
           reasons = validate_plan_review(
               repository=sys.argv[1], issue=issue, comment=latest_plan_review(comments),
-              allowlist={value.strip() for value in sys.argv[3].split(",") if value.strip()},
-              luna_allowlist={value.strip() for value in sys.argv[2].split(",") if value.strip()},
+              allowlist={value.strip() for value in sys.argv[2].split(",") if value.strip()},
           )
           if reasons:
               print("; ".join(reasons), file=sys.stderr)

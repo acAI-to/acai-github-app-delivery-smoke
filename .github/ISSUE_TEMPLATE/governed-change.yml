@@ -78,7 +78,7 @@ body:
       options:
         - automated
         - focused
-        - luna-max
+        - independent-review
     validations:
       required: true
   - type: dropdown

@@ -5,7 +5,7 @@ Repository kind: <harness|apps|acai-ops>
 Change class: <mechanical|routine|bugfix|governance|other>
 Risk tags: <comma-separated tags or none>
 GitHub status: <enforced|advisory/pre-enforcement|unknown>
-Adversarial profile: <automated|focused|luna-max>
+Adversarial profile: <automated|focused|independent-review>
 Action phase: <reviewable-artifact|live-mutation>
 Merge effect: <none|live-mutation>
 
@@ -19,13 +19,13 @@ Copy the approved issue plan or link its exact section.
 
 | Criterion | Owner | Evidence |
 |---|---|---|
-| <criterion> | <manager|tester|luna-max-review> | <command, test, or artifact> |
+| <criterion> | <manager|tester|independent-review> | <command, test, or artifact> |
 
 ## Tier-specific gates
 
 - Tier 0: Gate A is required. Record the automated/mechanical adversarial scope; no director/operator approval or Gate B is claimed.
 - Tier 1: record Gate A and the documented Gate-B waiver; no separate approval artifact is required.
-- Tier 2: link the issue’s digest-bound Luna/max review artifact and the operator `acai-plan-approved` bot attestation. Gate B remains pending until the final full head SHA is independently reviewed.
+- Tier 2: link the issue’s digest-bound independent-review artifact and the operator `acai-plan-approved` bot attestation. Gate B remains pending until the final full head SHA is independently reviewed.
 
 ## Gate A
 
@@ -33,14 +33,14 @@ Pending implementation validation.
 
 ## Gate B (Tier 2 only)
 
-Post the following through the trusted Luna/max relay after reviewing the final head. A new commit invalidates it.
+Post the following through the trusted independent-review relay after reviewing the final head. A new commit invalidates it.
 
 ```text
 <!-- ACAI-GATE-B -->
 Gate-B: PASS
 Commit: <full 40-character head SHA>
-Reviewer: luna-max
-Session: <Luna/max review session id>
+Reviewer: independent-review
+Session: <independent review session id>
 ```
 
 ## Outstanding gates

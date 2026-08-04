@@ -256,7 +256,7 @@ def _deployment_invocation(
 
 def _approval_reasons(payload: dict[str, Any], issue: dict[str, Any], comments: list[dict[str, Any]], timeline: list[dict[str, Any]], repository: str) -> list[str]:
     approval = payload.get("operator_approval") if isinstance(payload.get("operator_approval"), dict) else {}
-    terra = payload.get("terra_review") if isinstance(payload.get("terra_review"), dict) else {}
+    independent = payload.get("independent_review") if isinstance(payload.get("independent_review"), dict) else {}
     reasons: list[str] = []
     comment = _comment(comments, approval.get("comment_id"), approval.get("url"))
     if not _unedited(comment, bot=True):
@@ -271,24 +271,24 @@ def _approval_reasons(payload: dict[str, Any], issue: dict[str, Any], comments: 
     # trusting copied prose or a stale comment.
     actor = str(approval.get("actor", ""))
     reasons.extend(plan_approval.validate_approval(repository=repository, issue=issue, comments=comments, timeline=timeline, allowlist={actor} if actor else set()))
-    review = _comment(comments, terra.get("comment_id"), terra.get("url"))
+    review = _comment(comments, independent.get("comment_id"), independent.get("url"))
     if not _unedited(review):
-        reasons.append("current Terra plan review is missing or edited")
+        reasons.append("current independent plan review is missing or edited")
     elif review:
         digest = plan_approval.plan_review_digest(str(issue.get("body", "")))
-        # The trusted release workflow already checked the repository's Terra
+        # The trusted release workflow already checked the repository's independent
         # allowlist before binding this immutable comment.  Target-side
         # verification must bind that exact unedited comment and its declared
         # reviewer, rather than treating the semantic reviewer field as a
         # GitHub-login allowlist entry.
-        reviewer = str(terra.get("reviewer", ""))
+        reviewer = str(independent.get("reviewer", ""))
         author = str((review.get("user") or {}).get("login", ""))
         reasons.extend(plan_approval.validate_plan_review(repository=repository, issue=issue, comment=review, allowlist={author} if author else set()))
         fields = {line.split(":", 1)[0]: line.split(":", 1)[1].strip() for line in str(review.get("body", "")).splitlines() if ":" in line}
         if fields.get("Reviewer") != reviewer:
-            reasons.append("current Terra plan review reviewer does not match release attestation")
-        if fields.get("Digest-SHA256") != digest or fields.get("Digest-SHA256") != terra.get("digest_sha256"):
-            reasons.append("current Terra plan review digest does not match release attestation")
+            reasons.append("current independent plan review reviewer does not match release attestation")
+        if fields.get("Digest-SHA256") != digest or fields.get("Digest-SHA256") != independent.get("digest_sha256"):
+            reasons.append("current independent plan review digest does not match release attestation")
     return list(dict.fromkeys(reasons))
 
 
@@ -298,8 +298,8 @@ def validate_release_attestation(attestation: dict[str, Any], source_pr: dict[st
     payload, reasons = _payload_attestation(raw)
     if not payload:
         return list(dict.fromkeys(reasons))
-    required = {"schema", "repository", "issue", "pr", "approved_head", "merge_commit", "default_branch", "operator_approval", "terra_review", "trusted_workflow", "manifest", "tree"}
-    if set(payload) != required or payload.get("schema") != SCHEMA:
+    required = {"schema", "repository", "issue", "pr", "approved_head", "merge_commit", "default_branch", "operator_approval", "trusted_workflow", "manifest", "tree"}
+    if set(payload) != required | {"independent_review"} or payload.get("schema") != SCHEMA:
         reasons.append("release attestation schema is missing, unknown, or has extra fields")
         return list(dict.fromkeys(reasons))
     if payload.get("repository") != repository or payload.get("default_branch") != default_branch:
@@ -458,13 +458,13 @@ def build_release_payload(data: dict[str, Any]) -> tuple[dict[str, Any] | None, 
     if data.get("manifest_asset_contained") is not True:
         reasons.append("manifest asset commit is not contained in the manifest carrier history")
     operator_allow = {str(v) for v in data.get("operator_logins", []) if str(v)}
-    terra_allow = {str(v) for v in data.get("terra_high_review_logins", []) if str(v)}
+    independent_allow = {str(v) for v in data.get("independent_review_logins", []) if str(v)}
     reasons.extend(plan_approval.validate_approval(repository=repository, issue=issue, comments=comments, timeline=timeline, allowlist=operator_allow))
-    review = max((c for c in comments if isinstance(c, dict) and "<!-- ACAI-TERRA-HIGH-PLAN-REVIEW -->" in str(c.get("body", ""))), key=lambda c: str(c.get("updated_at") or c.get("created_at") or ""), default=None)
-    reasons.extend(plan_approval.validate_plan_review(repository=repository, issue=issue, comment=review, allowlist=terra_allow))
+    review = max((c for c in comments if isinstance(c, dict) and plan_approval.PLAN_REVIEW_MARKER in str(c.get("body", ""))), key=lambda c: str(c.get("updated_at") or c.get("created_at") or ""), default=None)
+    reasons.extend(plan_approval.validate_plan_review(repository=repository, issue=issue, comment=review, allowlist=independent_allow))
     approval = max((c for c in comments if isinstance(c, dict) and "<!-- ACAI-PLAN-APPROVAL -->" in str(c.get("body", ""))), key=lambda c: str(c.get("updated_at") or c.get("created_at") or ""), default=None)
     if not _unedited(approval, bot=True) or not _unedited(review):
-        reasons.append("trusted release approval or Terra evidence is edited/unavailable")
+        reasons.append("trusted release approval or independent-review evidence is edited/unavailable")
     if reasons:
         return None, list(dict.fromkeys(reasons))
     approval_fields, _ = plan_approval.parse_attestation(approval)
@@ -473,7 +473,7 @@ def build_release_payload(data: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         "schema": SCHEMA, "repository": repository, "issue": issue_number, "pr": pr.get("number"),
         "approved_head": head, "merge_commit": merge, "default_branch": default_branch,
         "operator_approval": {"comment_id": approval.get("id"), "url": approval.get("html_url", approval.get("url")), "digest_sha256": approval_fields.get("Digest-SHA256"), "actor": approval_fields.get("Actor")},
-        "terra_review": {"comment_id": review.get("id"), "url": review.get("html_url", review.get("url")), "digest_sha256": review_fields.get("Digest-SHA256"), "reviewer": review_fields.get("Reviewer")},
+        "independent_review": {"comment_id": review.get("id"), "url": review.get("html_url", review.get("url")), "digest_sha256": review_fields.get("Digest-SHA256"), "reviewer": review_fields.get("Reviewer")},
         "trusted_workflow": {"run_id": run.get("id"), "url": run.get("html_url"), "event": run.get("event"), "ref": run.get("head_branch"), "sha": run.get("head_sha"), "actor": (run.get("actor") or {}).get("login"), "workflow_path": str(run.get("path", "")).split("@", 1)[0]},
         "manifest": {"commit": manifest_carrier, "path": MANIFEST_PATH, "sha256": hashlib.sha256(content).hexdigest(), "bytes_base64": base64.b64encode(content).decode("ascii")},
         "tree": tree,
