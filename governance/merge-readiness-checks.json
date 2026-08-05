@@ -1,8 +1,0 @@
-{
-  "version": 2,
-  "checks": [
-    {"kind": "check_run", "name": "issue-first", "publisher": "github-actions", "workflow": ".github/workflows/change-governance.yml", "workflow_event": "pull_request", "workflow_ref": "head", "workflow_status": "completed", "workflow_conclusion": "success", "conclusion": "success", "cardinality": "exactly_one_latest", "tiers": [0, 1, 2]},
-    {"kind": "check_run", "names": ["test", "tests", "native-checks", "governance-tests", "governance-and-backend", "frontend-checks", "compose-validation"], "publisher": "github-actions", "workflow": ".github/workflows/ci.yml", "workflow_event": "pull_request", "workflow_ref": "head", "workflow_status": "completed", "workflow_conclusion": "success", "conclusion": "success", "cardinality": "exactly_one_latest", "tiers": [0, 1, 2]},
-    {"kind": "commit_status", "name": "governance/gate-b", "publisher": null, "workflows": [".github/workflows/independent-review-gate-b-relay.yml"], "workflow_event": "workflow_dispatch", "workflow_ref": "default_branch", "workflow_status": "completed", "workflow_conclusion": "success", "conclusion": "success", "cardinality": "exactly_one_latest", "tiers": [2]}
-  ]
-}

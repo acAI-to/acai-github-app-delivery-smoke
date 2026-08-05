@@ -1,0 +1,55 @@
+name: acai-governance
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  issues:
+    types: [labeled, edited, unlabeled]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      head_sha:
+        required: true
+        type: string
+      session_id:
+        required: true
+        type: string
+      verdict:
+        required: true
+        type: string
+      findings:
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  issues: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  governance:
+    if: github.repository != 'acAI-to/acai-harness'
+    uses: acAI-to/acai-harness/.github/workflows/target-governance.yml@target-governance-v1
+    with:
+      event_name: ${{ github.event_name }}
+      event_action: ${{ github.event.action }}
+      repository: ${{ github.repository }}
+      repository_id: ${{ github.repository_id }}
+      actor: ${{ github.triggering_actor }}
+      issue_number: ${{ github.event.issue.number || inputs.pr_number || '' }}
+      issue_body: ${{ github.event.issue.body || '' }}
+      previous_issue_body: ${{ github.event.changes.body.from || '' }}
+      event_label: ${{ github.event.label.name || '' }}
+      is_pr_comment: ${{ github.event.issue.pull_request != null }}
+      pr_number: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number || '' }}
+      head_sha: ${{ github.event.pull_request.head.sha || inputs.head_sha || '' }}
+      session_id: ${{ inputs.session_id || '' }}
+      verdict: ${{ inputs.verdict || '' }}
+      findings: ${{ inputs.findings || '' }}
