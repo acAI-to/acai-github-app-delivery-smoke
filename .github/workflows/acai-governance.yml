@@ -2,7 +2,7 @@ name: acai-governance
 
 on:
   pull_request:
-    types: [synchronize, ready_for_review]
+    types: [opened, synchronize, reopened]
   issues:
     types: [labeled]
   workflow_dispatch:
@@ -33,7 +33,7 @@ permissions:
 
 jobs:
   governance:
-    if: github.repository != 'acAI-to/acai-harness'
+    if: github.event_name != 'issues' || github.event.label.name == 'acai-plan-approved'
     uses: acAI-to/acai-harness/.github/workflows/target-governance.yml@target-governance-v1
     with:
       event_name: ${{ github.event_name }}
