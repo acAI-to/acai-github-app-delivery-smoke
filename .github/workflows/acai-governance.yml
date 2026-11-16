@@ -5,22 +5,28 @@ on:
     types: [opened, synchronize, reopened]
   issues:
     types: [labeled]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       pr_number:
         required: true
         type: string
+      action_comment_id:
+        description: Original operator comment ID to attest; pr_number identifies its issue
+        required: false
+        type: string
       head_sha:
-        required: true
+        required: false
         type: string
       session_id:
-        required: true
+        required: false
         type: string
       verdict:
-        required: true
+        required: false
         type: string
       findings:
-        required: true
+        required: false
         type: string
 
 permissions:
@@ -33,7 +39,10 @@ permissions:
 
 jobs:
   governance:
-    if: github.event_name != 'issues' || github.event.label.name == 'acai-plan-approved'
+    if: >-
+      (github.event_name != 'issues' || github.event.label.name == 'acai-plan-approved') &&
+      (github.event_name != 'issue_comment' ||
+       (github.event.issue.pull_request == null && startsWith(github.event.comment.body, '<!-- ACAI-ACTION-AUTHORIZATION-REQUEST -->')))
     uses: acAI-to/acai-harness/.github/workflows/target-governance.yml@target-governance-v1
     with:
       event_name: ${{ github.event_name }}
